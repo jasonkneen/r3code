@@ -1625,8 +1625,10 @@ interface ThreadDetailCache {
   /** The last stream sequence applied to this detail (the reference's ThreadResumeSnapshot.sequence); null when unknown. */
   sequence: number | null;
 }
+const MAX_THREAD_DETAIL_CACHE = 8;
 const threadDetailCache = new Map<string, ThreadDetailCache>();
 function stashThreadDetail(threadId: string) {
+  threadDetailCache.delete(threadId);
   threadDetailCache.set(threadId, {
     runtimeRequests: runtimeRequests(), turnItems: turnItems(), turnItemOrders: turnItemOrders(),
     subagentRecords: subagentRecords(), runList: runList(), checkpointList: checkpointList(),
@@ -1635,6 +1637,26 @@ function stashThreadDetail(threadId: string) {
     threadRecord: threadRecord(), providerSessions: providerSessionRecords(), providerThreads: providerThreadRecords(),
     providerState: providerState(), bannerState: threadSessionState(), sequence: openThreadSequence,
   });
+  if (threadDetailCache.size <= MAX_THREAD_DETAIL_CACHE) return;
+  const activeId = untracked(openThreadId);
+  const evicted: string[] = [];
+  for (const candidate of threadDetailCache.keys()) {
+    if (threadDetailCache.size <= MAX_THREAD_DETAIL_CACHE) break;
+    if (candidate === threadId || candidate === activeId || sideSubscriptions.has(candidate)) continue;
+    threadDetailCache.delete(candidate);
+    threadWireDecoders.delete(`open:${candidate}`);
+    if (isServerThread(candidate)) evicted.push(candidate);
+  }
+  if (evicted.length > 0) {
+    transcripts.update((all) => {
+      let changed = false;
+      const next = { ...all };
+      for (const id of evicted) {
+        if (id in next) { delete next[id]; changed = true; }
+      }
+      return changed ? next : all;
+    });
+  }
 }
 /** The open thread's own record and provider sessions/threads as the stream delivers them (projection.thread, .providerSessions, .providerThreads). */
 const threadRecord = signal<Record<string, unknown> | null>(null);
@@ -4505,8 +4527,16 @@ export function retainThread(threadId: string): () => void {
     if (current.count > 0) return;
     current.stop?.();
     sideSubscriptions.delete(threadId);
+    threadWireDecoders.delete(`side:${threadId}`);
     stableSideMessages.delete(threadId);
     sideProjections.update((all) => { const { [threadId]: _dropped, ...rest } = all; return rest; });
+    if (threadId !== untracked(openThreadId) && !threadDetailCache.has(threadId) && isServerThread(threadId)) {
+      transcripts.update((all) => {
+        if (!(threadId in all)) return all;
+        const { [threadId]: _dropped, ...rest } = all;
+        return rest;
+      });
+    }
   };
 }
 /** How many views hold `threadId`'s extra subscription (0 when none), for tests and diagnostics. */

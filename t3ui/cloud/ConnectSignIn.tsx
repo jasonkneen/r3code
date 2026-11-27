@@ -9,7 +9,7 @@ import type { WebViewNavigation } from "nsh";
 import { SettingsDialog } from "../components/SettingsDialog";
 import { showToast } from "../components/toast/toastState";
 import { readConnectCallback } from "./connectAuth";
-import { beginConnectSignIn, connectAuthState, loadConnectSession, type ConnectSignInRequest } from "./connectSession";
+import { beginConnectSignIn, cancelPendingConnectSignIn, connectAuthState, loadConnectSession, type ConnectSignInRequest } from "./connectSession";
 import { hasCloudPublicConfig } from "./publicConfig";
 
 const pending = signal<ConnectSignInRequest | null>(null);
@@ -29,7 +29,9 @@ export async function openConnectSignIn(): Promise<void> {
 }
 
 export function closeConnectSignIn(): void {
+  finishing = false;
   pending.set(null);
+  cancelPendingConnectSignIn();
 }
 
 /** Every navigation of the sign-in WebView: the loopback callback ends the flow. */
@@ -40,15 +42,25 @@ export function handleConnectNavigation(url: string): boolean {
   if (result === null) return false;
   finishing = true;
   if (result.kind !== "code") {
+    finishing = false;
     pending.set(null);
+    cancelPendingConnectSignIn();
     showToast({ type: "error", title: "Could not sign in to T3 Connect", description: result.kind === "invalid" ? "Invalid T3 Connect authorization callback." : result.message });
     return true;
   }
   void request.finish(result.code).then(
-    () => { pending.set(null); },
+    () => {
+      if (pending() === request) {
+        finishing = false;
+        pending.set(null);
+      }
+    },
     (error) => {
-      pending.set(null);
-      showToast({ type: "error", title: "Could not sign in to T3 Connect", description: error instanceof Error ? error.message : String(error) });
+      if (pending() === request) {
+        finishing = false;
+        pending.set(null);
+        showToast({ type: "error", title: "Could not sign in to T3 Connect", description: error instanceof Error ? error.message : String(error) });
+      }
     },
   );
   return true;

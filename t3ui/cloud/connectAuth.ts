@@ -66,7 +66,18 @@ export async function makePkceRequest(): Promise<{ verifier: string; challenge: 
   return { verifier, challenge: base64Url(new Uint8Array(digest)), state };
 }
 
-export interface ConnectToken { accessToken: string; refreshToken: string; expiresAtEpochMs: number; identity?: string; /** The Clerk user id (`sub`), what the reference reads as useAuth().userId. */ userId?: string }
+export interface ConnectToken {
+  accessToken: string;
+  refreshToken: string;
+  expiresAtEpochMs: number;
+  identity?: string;
+  /** The Clerk user id (`sub`), what the reference reads as useAuth().userId. */
+  userId?: string;
+  /** Clerk Frontend API client JWT (`__client`), used to mint `t3-relay` session JWTs for DPoP relay routes. */
+  clerkClientToken?: string;
+  /** Active Clerk session id associated with `clerkClientToken`. */
+  clerkSessionId?: string;
+}
 
 /** idTokenIdentity: the id token's email, preferred_username or sub. */
 export function idTokenIdentity(idToken: unknown): string | null {
@@ -120,7 +131,15 @@ export function parsePersistedToken(raw: unknown): ConnectToken | null {
   try {
     const value = JSON.parse(raw);
     if (value && typeof value.accessToken === "string" && typeof value.refreshToken === "string" && typeof value.expiresAtEpochMs === "number") {
-      return { accessToken: value.accessToken, refreshToken: value.refreshToken, expiresAtEpochMs: value.expiresAtEpochMs, ...(typeof value.identity === "string" ? { identity: value.identity } : {}), ...(typeof value.userId === "string" ? { userId: value.userId } : {}) };
+      return {
+        accessToken: value.accessToken,
+        refreshToken: value.refreshToken,
+        expiresAtEpochMs: value.expiresAtEpochMs,
+        ...(typeof value.identity === "string" ? { identity: value.identity } : {}),
+        ...(typeof value.userId === "string" ? { userId: value.userId } : {}),
+        ...(typeof value.clerkClientToken === "string" && value.clerkClientToken.length > 0 ? { clerkClientToken: value.clerkClientToken } : {}),
+        ...(typeof value.clerkSessionId === "string" && value.clerkSessionId.length > 0 ? { clerkSessionId: value.clerkSessionId } : {}),
+      };
     }
   } catch { /* corrupt */ }
   return null;

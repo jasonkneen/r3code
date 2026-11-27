@@ -530,9 +530,24 @@ export function ThreadTimeline(props: {
     highlighted.set(null);
     clearTimeout(highlightTimer);
     const epoch = ++scrollEpoch;
-    // Until the thread is positioned, the list's own scrolls are not where the reader left it.
     restoring = true;
     restoreCancelled = false;
+    const pendingNow = untracked(sidebarSearchNavigation);
+    const blockedBySearch = Boolean(pendingNow && pendingNow.environment === scope.environment && pendingNow.generation === scope.generation && pendingNow.threadId === scope.threadId);
+    const currentNow = untracked(list);
+    const rowsNow = untracked(rows);
+    if (currentNow && !blockedBySearch && rowsNow.length > 0) {
+      const immediateTarget = restoreTarget(timelinePositions.recall(key), rowsNow.map((row) => row.id));
+      if (immediateTarget.kind === "row") {
+        follow.release();
+        currentNow.scrollToIndex({ index: immediateTarget.index, animated: false, viewPosition: 0, viewOffset: -immediateTarget.offsetWithinRow });
+      } else if (immediateTarget.kind === "offset") {
+        follow.release();
+        currentNow.scrollToOffset({ offset: immediateTarget.offset, animated: false });
+      } else {
+        currentNow.scrollToEnd({ animated: false });
+      }
+    }
     requestAnimationFrame(() => {
       // The reader can scroll between switching threads and this first frame.
       // Do not reset their cancellation or apply the remembered position after it.

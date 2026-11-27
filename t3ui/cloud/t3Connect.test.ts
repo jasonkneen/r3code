@@ -87,6 +87,68 @@ test("discovery lists the machines, exchanges for a DPoP token, then reads each 
   resetRelayDiscovery();
 });
 
+test("relay DPoP credentials are invalidated across sign-out and account switch even while an exchange is pending", async () => {
+  const idA = `${b64({ alg: "none" })}.${b64({ sub: "user_a", email: "a@b.c" })}.x`;
+  const idB = `${b64({ alg: "none" })}.${b64({ sub: "user_b", email: "b@b.c" })}.x`;
+  resetConnectSessionForTest();
+  const reqA = await beginConnectSignIn((async () => ({ ok: true, status: 200, json: async () => ({ access_token: "oauth-a", refresh_token: "ra", expires_in: 3600, id_token: idA }) })) as any);
+  await reqA.finish("ca");
+
+  let markExchangeStarted!: () => void;
+  const exchangeStarted = new Promise<void>((r) => { markExchangeStarted = r; });
+  let releaseFirstExchange!: (v: any) => void;
+  const firstExchange = new Promise<any>((r) => { releaseFirstExchange = r; });
+  const dpopSubjects: string[] = [];
+  const connectAuthHeaders: string[] = [];
+
+  setRelayDiscoveryFetchForTest(async (url, init) => {
+    if (url.endsWith("/v1/client/dpop-token")) {
+      const subject = new URLSearchParams(init.body).get("subject_token") ?? "";
+      dpopSubjects.push(subject);
+      if (subject === "oauth-a") {
+        markExchangeStarted();
+        return firstExchange;
+      }
+      return { ok: true, status: 200, json: async () => ({ access_token: `dpop-${subject}`, expires_in: 300, scope: "environment:connect" }) };
+    }
+    connectAuthHeaders.push(init.headers.authorization ?? "");
+    return { ok: true, status: 200, json: async () => ({ environmentId: "env1", endpoint: { httpBaseUrl: "https://env1.t3.codes", providerKind: "cloudflare_tunnel" }, credential: "cred", expiresAt: "x" }) };
+  });
+
+  const pendingA = connectRelayEnvironment("env1");
+  await exchangeStarted;
+  await signOutOfConnect();
+  const reqB = await beginConnectSignIn((async () => ({ ok: true, status: 200, json: async () => ({ access_token: "oauth-b", refresh_token: "rb", expires_in: 3600, id_token: idB }) })) as any);
+  await reqB.finish("cb");
+
+  releaseFirstExchange({ ok: true, status: 200, json: async () => ({ access_token: "dpop-oauth-a", expires_in: 300, scope: "environment:connect" }) });
+  await expect(pendingA).rejects.toThrow("T3 Connect session changed.");
+
+  await connectRelayEnvironment("env1");
+  expect(dpopSubjects).toEqual(["oauth-a", "oauth-b"]);
+  expect(connectAuthHeaders).toEqual(["DPoP dpop-oauth-b"]);
+
+  let markConnectStarted!: () => void;
+  const connectStarted = new Promise<void>((r) => { markConnectStarted = r; });
+  let releaseConnect!: (v: any) => void;
+  const pendingConnectReply = new Promise<any>((r) => { releaseConnect = r; });
+  setRelayDiscoveryFetchForTest(async (url) => {
+    if (url.endsWith("/v1/client/dpop-token")) {
+      return { ok: true, status: 200, json: async () => ({ access_token: "dpop-b2", expires_in: 300, scope: "environment:connect" }) };
+    }
+    markConnectStarted();
+    return pendingConnectReply;
+  });
+  const pendingConnect = connectRelayEnvironment("env1");
+  await connectStarted;
+  await signOutOfConnect();
+  releaseConnect({ ok: true, status: 200, json: async () => ({ environmentId: "env1", endpoint: { httpBaseUrl: "https://env1.t3.codes", providerKind: "cloudflare_tunnel" }, credential: "stale-cred", expiresAt: "x" }) });
+  await expect(pendingConnect).rejects.toThrow("T3 Connect session changed.");
+  setRelayDiscoveryFetchForTest(null);
+  resetRelayDiscovery();
+  await signOutOfConnect();
+});
+
 test("signed out, discovery settles to an empty, unlisted list", async () => {
   await signOutOfConnect();
   setRelayDiscoveryFetchForTest(null);

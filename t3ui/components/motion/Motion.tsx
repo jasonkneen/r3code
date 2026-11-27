@@ -7,6 +7,47 @@ import { createStableRows } from "../stableRows";
 import type { MotionSpec, StyleProp, ViewStyle } from "nsh";
 
 type Content = ReturnType<typeof View>;
+type MotionChannel = "opacity" | "translateX" | "translateY" | "rotate" | "rotateX" | "rotateY" | "scale" | "scaleX" | "scaleY";
+const MOTION_CHANNELS: readonly MotionChannel[] = ["opacity", "translateX", "translateY", "rotate", "rotateX", "rotateY", "scale", "scaleX", "scaleY"];
+
+export function specStartValues(spec: MotionSpec): Partial<Record<MotionChannel, number>> {
+  const start: Partial<Record<MotionChannel, number>> = {};
+  const frames = spec.keyframes;
+  if (Array.isArray(frames)) {
+    const first = frames[0] as Record<string, unknown> | undefined;
+    if (first) {
+      for (const channel of MOTION_CHANNELS) {
+        const value = first[channel];
+        if (typeof value === "number") start[channel] = value;
+      }
+    }
+    return start;
+  }
+  const byChannel = frames as Record<string, readonly unknown[] | undefined>;
+  for (const channel of MOTION_CHANNELS) {
+    const list = byChannel[channel];
+    if (!list || list.length === 0) continue;
+    const first = list[0];
+    if (typeof first === "number") start[channel] = first;
+    else if (first && typeof first === "object" && typeof (first as { value?: unknown }).value === "number") {
+      start[channel] = (first as { value: number }).value;
+    }
+  }
+  return start;
+}
+
+function shouldAnimateSpec(spec: MotionSpec): boolean {
+  return !reduceMotion() || spec.ignoreReduceMotion === true;
+}
+
+export function applyStartValues(motion: ReturnType<typeof createMotion>, spec: MotionSpec): void {
+  if (!shouldAnimateSpec(spec)) return;
+  const start = specStartValues(spec);
+  for (const channel of MOTION_CHANNELS) {
+    const value = start[channel];
+    if (value !== undefined) motion[channel].set(value);
+  }
+}
 
 /**
  * Plays `spec` once when it mounts: the port's stand-in for Base UI's `data-starting-style` (the view
@@ -14,11 +55,11 @@ type Content = ReturnType<typeof View>;
  * hit-tested at its final frame from the start; only opacity and transform move.
  */
 export function MotionEnter(props: { spec: MotionSpec; when?: () => boolean; class?: string; style?: StyleProp<ViewStyle>; testID?: string; children?: Content }) {
-  const motion = createMotion();
-  // Plays on mount, or each time `when()` turns true for a host that keeps its children mounted while closed.
+  const initiallyOn = untracked(() => (props.when ? props.when() : true));
+  const motion = createMotion(initiallyOn && shouldAnimateSpec(props.spec) ? { initial: specStartValues(props.spec) } : undefined);
   effect(() => {
     const on = props.when ? props.when() : true;
-    if (on) untracked(() => void motion.play(props.spec));
+    if (on) untracked(() => { applyStartValues(motion, props.spec); void motion.play(props.spec); });
   });
   return (
     <View class={props.class} testID={props.testID} style={[props.style, motion.style] as StyleProp<ViewStyle>}>
@@ -93,10 +134,11 @@ export function createPresence(open: () => boolean, durationMs: () => number, an
  * `style={enterStyle(fadeInStart)}`. Call it in the component body that renders the view.
  */
 export function enterStyle(spec: MotionSpec, when?: () => boolean) {
-  const motion = createMotion();
+  const initiallyOn = untracked(() => (when ? when() : true));
+  const motion = createMotion(initiallyOn && shouldAnimateSpec(spec) ? { initial: specStartValues(spec) } : undefined);
   effect(() => {
     const on = when ? when() : true;
-    if (on) untracked(() => void motion.play(spec));
+    if (on) untracked(() => { applyStartValues(motion, spec); void motion.play(spec); });
   });
   return motion.style;
 }
@@ -107,13 +149,18 @@ export function enterStyle(spec: MotionSpec, when?: () => boolean) {
  * kept by `createPresence` / `<Presence>`.
  */
 export function presenceStyle(enter: MotionSpec, exit: MotionSpec, open: () => boolean) {
-  const motion = createMotion();
+  const initiallyOpen = untracked(open);
+  const motion = createMotion(initiallyOpen && shouldAnimateSpec(enter) ? { initial: specStartValues(enter) } : undefined);
   let first = true;
   effect(() => {
     const on = open();
     untracked(() => {
-      if (on) void motion.play(enter);
-      else if (!first) void motion.play(exit);
+      if (on) {
+        applyStartValues(motion, enter);
+        void motion.play(enter);
+      } else if (!first) {
+        void motion.play(exit);
+      }
     });
     first = false;
   });
@@ -171,7 +218,11 @@ export function listRowEnterStyle(list: string, travel: number) {
       if (animate) for (const play of batch) play();
     });
   }
-  entry.batch.push(() => void motion.play(sidebarRowEnter(travel)));
+  entry.batch.push(() => {
+    const spec = sidebarRowEnter(travel);
+    applyStartValues(motion, spec);
+    void motion.play(spec);
+  });
   entry.live += 1;
   cleanup(() => { entry.live -= 1; });
   return motion.style;
@@ -238,7 +289,11 @@ function MotionEachRow<T>(props: { leaving: () => boolean; item: () => T; render
     if (untracked(props.leaving)) return;
     const y = event.bounds.origin.y;
     height = event.bounds.size.height;
-    if (top !== undefined && y !== top && !reduceMotion()) void motion.play(sidebarRowMove(top - y));
+    if (top !== undefined && y !== top && !reduceMotion()) {
+      const move = sidebarRowMove(top - y);
+      applyStartValues(motion, move);
+      void motion.play(move);
+    }
     top = y;
   };
   return (
@@ -314,7 +369,11 @@ export function RailIndicator(props: { top: () => number | null; class?: string 
   effect(() => {
     const next = props.top();
     untracked(() => {
-      if (previous !== null && next !== null && previous !== next) void motion.play(railIndicatorMove(previous - next));
+      if (previous !== null && next !== null && previous !== next) {
+        const move = railIndicatorMove(previous - next);
+        applyStartValues(motion, move);
+        void motion.play(move);
+      }
       previous = next;
     });
   });
