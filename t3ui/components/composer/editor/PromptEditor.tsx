@@ -24,7 +24,7 @@ import { CodeBlockLanguagePicker } from "./CodeBlockLanguagePicker";
 import { withInfoStringLanguage } from "./richMarkdown";
 import { settingValue } from "../../../store";
 import { codeTextStyle } from "../../../typography";
-import { listContinuationForEnter, listIndentForTab, listOutdentForTab } from "./listContinuation";
+import { joinParagraphAfterListAtStart, liftBlockPrefixAtStart, listContinuationForEnter, listIndentForTab, listOutdentForTab } from "./listContinuation";
 import type { ComposerListEdit } from "./listContinuation";
 import type { PromptTokenContext } from "./promptDocument";
 import { composerPageScrollKey, scrollTimelineByPage } from "../../thread/timeline/pageScroll";
@@ -235,7 +235,21 @@ export function PromptEditor(props: PromptEditorProps) {
   const context = (): PromptTokenContext => ({ ...props.context(), richText: rich() });
   let lastText = props.value();
   // Where the caret is, for the keys a code block or a selection claims before they arrive.
-  const caretState = signal<{ inCode: boolean; codeStart: boolean; fenceLine: boolean; range: boolean; inList: boolean; blockStart: boolean; inHeading: boolean }>({ inCode: false, codeStart: false, fenceLine: false, range: false, inList: false, blockStart: false, inHeading: false });
+  const caretState = signal<{ inCode: boolean; codeStart: boolean; fenceLine: boolean; range: boolean; inList: boolean; blockStart: boolean; inHeading: boolean; afterList: boolean }>({ inCode: false, codeStart: false, fenceLine: false, range: false, inList: false, blockStart: false, inHeading: false, afterList: false });
+  const LIST_BLOCK_TYPES = new Set(["bulletList", "orderedList", "taskList"]);
+  const isAfterList = (doc: RichNodeJSON, head: number): boolean => {
+    const blocks = doc.content ?? [];
+    let pos = 0;
+    for (let index = 0; index < blocks.length; index += 1) {
+      const block = blocks[index]!;
+      const size = nodeSize(block);
+      if (head >= pos && head < pos + size) {
+        return index > 0 && block.type === "paragraph" && head === pos + 1 && LIST_BLOCK_TYPES.has(blocks[index - 1]!.type);
+      }
+      pos += size;
+    }
+    return false;
+  };
   const paragraphText = (node: RichNodeJSON) => docToPrompt({ type: "doc", content: [node] });
   // A document's block tree without its text: what a typed Markdown block shortcut changes.
   const blockShape = (node: RichNodeJSON): string => node.type === "text" || node.type === TOKEN_NODE ? "" : `${node.type}(${(node.content ?? []).map(blockShape).join("")})`;
@@ -266,7 +280,7 @@ export function PromptEditor(props: PromptEditorProps) {
     readEdges(live);
     const { anchor, head, type } = live.selection;
     // Select all is an AllSelection: no anchor or head, the whole document.
-    if (type === "all") { caretState.set({ inCode: false, codeStart: false, fenceLine: false, range: !live.isEmpty, inList: false, blockStart: false, inHeading: false }); return; }
+    if (type === "all") { caretState.set({ inCode: false, codeStart: false, fenceLine: false, range: !live.isEmpty, inList: false, blockStart: false, inHeading: false, afterList: false }); return; }
     if (head === undefined) return;
     const at = blockAt(live.doc, Number(head));
     const range = (anchor ?? head) !== head;
@@ -275,6 +289,7 @@ export function PromptEditor(props: PromptEditorProps) {
       codeStart: !range && at?.node.type === CODE_BLOCK_NODE && at.offset === 0,
       fenceLine: !range && at?.node.type === "paragraph" && /^(`{3,}|~{3,})/.test(paragraphText(at.node)),
       range,
+      afterList: !range && isAfterList(live.doc, Number(head)),
       ...textblockAt(live, Number(head), range),
     });
   };
@@ -287,6 +302,8 @@ export function PromptEditor(props: PromptEditorProps) {
     } catch { return { inList: false, blockStart: false, inHeading: false }; }
   };
   let firstBlockMarked = "";
+  let lastSelectionKey = "";
+  let blockCheckPending = false;
   const markFirstBlock = (live: ReturnType<typeof createRichEditor>) => {
     const first = live.doc.content?.[0];
     const key = first && first.type !== "paragraph" ? `${first.type}:${nodeSize(first)}` : "";
@@ -306,7 +323,6 @@ export function PromptEditor(props: PromptEditorProps) {
     rebuild(next.text, next.caret);
     return true;
   };
-  const lineAround = (text: string, offset: number) => { const start = text.lastIndexOf("\n", offset - 1) + 1; const endAt = text.indexOf("\n", offset); return { start, end: endAt === -1 ? text.length : endAt }; };
   const listEnterEdit = () => markdownEdit((text, offset) => {
     const ranges = collectPromptTokens(text, untracked(context));
     const edit = listContinuationForEnter(text, offset, ranges);
@@ -314,13 +330,9 @@ export function PromptEditor(props: PromptEditorProps) {
   });
   const liftAtStart = () => markdownEdit((text, offset) => {
     const ranges = collectPromptTokens(text, untracked(context));
-    const outdent = listOutdentForTab(text, offset, offset, ranges);
-    if (outdent) return { text: text.slice(0, outdent.start) + outdent.replacement + text.slice(outdent.end), caret: outdent.cursorAfter };
-    const line = lineAround(text, offset);
-    const prefix = /^(?:[ \t]*(?:-[ \t]+\[[ xX]\][ \t]*|\d+[.)][ \t]*|[-*+][ \t]*)|#{1,6}[ \t]+)/.exec(text.slice(line.start, line.end));
-    if (!prefix || offset !== line.start + prefix[0].length) return null;
-    return { text: text.slice(0, line.start) + text.slice(line.start + prefix[0].length), caret: line.start };
+    return liftBlockPrefixAtStart(text, offset, ranges);
   });
+  const joinAfterList = () => markdownEdit((text, offset) => joinParagraphAfterListAtStart(text, offset));
   // composer-markdown-source.ts: styled text the selection touches is shown as its Markdown (editable delimiters, the
   // styling previewed); once the selection leaves it is read back. The prompt text is the same either way.
   let revealed: { start: number; end: number } | null = null;
@@ -413,8 +425,11 @@ export function PromptEditor(props: PromptEditorProps) {
     // Backspace at a code block's start turns it back into lines (unwrapCodeBlockAtStart).
     const codeBackspace = plugin(["Backspace"], () => {
       const { anchor, head } = selection();
-      if (applyCodeEdit(unwrapCodeBlockAtStart(untracked(current).session.doc, anchor, head))) return;
-      if (!liftAtStart()) untracked(current).session.run(richCommand("joinBackward"));
+      const doc = untracked(current).session.doc;
+      if (applyCodeEdit(unwrapCodeBlockAtStart(doc, anchor, head))) return;
+      if (liftAtStart()) return;
+      if (anchor === head && isAfterList(doc, head) && joinAfterList()) return;
+      untracked(current).session.run(richCommand("joinBackward"));
     });
     // Mod+B bolds selected text only (ComposerBoldSelectionOnlyExtension); without a selection it stays the sidebar toggle.
     const boldKey = plugin(["Mod-b"], () => { untracked(current).session.run(toggleMark("bold")); });
@@ -450,6 +465,8 @@ export function PromptEditor(props: PromptEditorProps) {
     // `.composer-tiptap > :first-child { margin-top: 0 }`: a leading heading, list or quote does not push the first line down.
     const firstBlock = new RichEditorPlugin("firstBlock");
     firstBlockMarked = "";
+    lastSelectionKey = "";
+    blockCheckPending = false;
     const session = createRichEditor({
       schema: promptSchema,
       doc,
@@ -521,10 +538,11 @@ export function PromptEditor(props: PromptEditorProps) {
   mounted.add(entry);
   cleanup(() => {
     mounted.delete(entry);
+    if (settleTimer) clearTimeout(settleTimer);
     if (focusedNow) { focusedNow = false; noteEditorFocus(false); }
   });
   effect(() => { const c = current(); c.enter.capturing = props.keys.captureEnter() || c.rich; });
-  effect(() => { const c = current(); const at = caretState(); c.codeBackspace.capturing = c.rich && (at.codeStart || (at.blockStart && (at.inList || at.inHeading))); });
+  effect(() => { const c = current(); const at = caretState(); c.codeBackspace.capturing = c.rich && (at.codeStart || (at.blockStart && (at.inList || at.inHeading || at.afterList))); });
   effect(() => { const c = current(); c.boldKey.capturing = c.rich && caretState().range; });
   effect(() => { const c = current(); const edges = caretEdges(); c.arrows.capturing = props.keys.captureArrows("ArrowUp", edges.start); c.arrowDown.capturing = props.keys.captureArrows("ArrowDown", edges.end); });
   // Rich text claims Tab and Shift+Tab always (the handlers decide), so a Tab that lands before the caret state reached JS
@@ -540,56 +558,88 @@ export function PromptEditor(props: PromptEditorProps) {
   const rebuild = (next: string | RichNodeJSON, caret: number) => {
     // A rebuilt prompt shows no source; the selection's sync reveals it again where the caret lands.
     revealed = null;
+    lastSelectionKey = "";
     const doc = typeof next === "string" ? promptToDoc(next, untracked(context)) : next;
     session().setContent(doc);
     select(caret);
   };
 
   let handledRevision = -1;
+  const selectionKey = (live: ReturnType<typeof createRichEditor>) => {
+    const { type, anchor, head } = live.selection;
+    return `${live.revision}:${type}:${anchor ?? ""}:${head ?? ""}`;
+  };
+  const sameMap = <V,>(a?: ReadonlyMap<string, V>, b?: ReadonlyMap<string, V>): boolean => {
+    if (a === b) return true;
+    const aSize = a?.size ?? 0;
+    const bSize = b?.size ?? 0;
+    if (aSize !== bSize) return false;
+    if (aSize === 0) return true;
+    for (const [key, value] of a!) if (b!.get(key) !== value) return false;
+    return true;
+  };
+  const sameSet = (a?: ReadonlySet<string>, b?: ReadonlySet<string>): boolean => {
+    if (a === b) return true;
+    const aSize = a?.size ?? 0;
+    const bSize = b?.size ?? 0;
+    if (aSize !== bSize) return false;
+    if (aSize === 0) return true;
+    for (const value of a!) if (!b!.has(value)) return false;
+    return true;
+  };
+  const sameContext = (a: PromptTokenContext | null, b: PromptTokenContext): boolean =>
+    a !== null && a.richText === b.richText && sameMap(a.skills, b.skills) && sameSet(a.folders, b.folders) && sameMap(a.models, b.models) && sameMap(a.fileAttachments, b.fileAttachments);
   const flushRevision = () => { const c = untracked(current).session; if (c.revision !== handledRevision) onRevision(() => c); };
   const onRevision = (session: () => ReturnType<typeof createRichEditor>) => {
     handledRevision = session().revision;
     const doc = session().doc;
     const text = docToPrompt(doc);
     const offset = posToOffset(doc, Number(session().selection.head ?? 0));
-    // Typed or pasted `$skill ` and `@path ` become tokens once the whitespace after them arrives.
-    // A typed "```lang " becomes a code block (Tiptap's CodeBlock input rule).
-    if (untracked(rich) && !session().composing && applyCodeEdit(convertFenceOnSpace(doc, Number(session().selection.head ?? 0)))) return;
-    // Typed block syntax (`- `, `1. `, `- [ ] `, `> `, `# `, `---`) becomes its node (Tiptap's input rules): the prompt
-    // read again has blocks this document lacks.
-    if (untracked(rich) && !session().composing) {
-      const reread = promptToDoc(text, untracked(context));
-      // A fence converts on Enter or a space (above), not while its line is still being typed.
-      const fences = (node: RichNodeJSON) => (node.content ?? []).filter((block) => block.type === CODE_BLOCK_NODE).length;
-      if (fences(reread) === fences(doc) && blockShape(reread) !== blockShape(doc)) { rebuild(text, offset); return; }
+    const textChanged = text !== lastText;
+    if (untracked(rich) && session().composing) {
+      if (textChanged) blockCheckPending = true;
+    } else if (untracked(rich)) {
+      if (applyCodeEdit(convertFenceOnSpace(doc, Number(session().selection.head ?? 0)))) return;
+      if (textChanged || blockCheckPending) {
+        blockCheckPending = false;
+        const reread = promptToDoc(text, untracked(context));
+        const fences = (node: RichNodeJSON) => (node.content ?? []).filter((block) => block.type === CODE_BLOCK_NODE).length;
+        if (fences(reread) === fences(doc) && blockShape(reread) !== blockShape(doc)) { rebuild(text, offset); return; }
+      }
     }
     const chipped = session().composing ? doc : retokenize(doc, untracked(context));
     if (!sameDoc(doc, chipped)) rebuild(chipped, offset);
-    if (text !== lastText) { lastText = text; props.onChange(text); }
+    if (textChanged) { lastText = text; props.onChange(text); }
     props.onCaret(offset);
-    const { anchor, head } = session().selection;
+    const live = session();
+    const { anchor, head } = live.selection;
     listCaret.set({ text, offset: head !== undefined && (anchor ?? head) === head ? offset : null });
-    readCaret(session());
+    lastSelectionKey = selectionKey(live);
+    readCaret(live);
     measureHeaders();
     syncReveal();
-    markFirstBlock(session());
+    markFirstBlock(live);
   };
   effect(() => { const c = current().session; const stop = c.on("revision", () => { if (untracked(current).session === c) onRevision(() => c); }); cleanup(stop); });
   // A prompt loaded with a heading first (a draft, a recall) gets the first-block rule without waiting for an edit.
   effect(() => { const c = current().session; queueMicrotask(() => { if (untracked(current).session === c) markFirstBlock(c); }); });
 
+  let lastContext: PromptTokenContext | null = null;
   effect(() => {
     const text = props.value();
     const forced = props.forcedCaret();
-    const context = { ...props.context(), richText: rich() };
+    const nextContext = { ...props.context(), richText: rich() };
+    const contextChanged = !sameContext(lastContext, nextContext);
+    lastContext = nextContext;
     if (text !== lastText) {
       lastText = text;
       rebuild(text, forced ?? text.length);
-    } else {
-      // The skills arriving (or a provider switch) chip what the prompt already names.
-      const chipped = retokenize(session().doc, context);
+    } else if (contextChanged) {
+      const chipped = retokenize(session().doc, nextContext);
       if (!sameDoc(session().doc, chipped)) rebuild(chipped, forced ?? posToOffset(session().doc, Number(session().selection.head ?? 0)));
       else if (forced !== undefined) select(forced);
+    } else if (forced !== undefined) {
+      select(forced);
     }
     if (forced !== undefined) props.onForcedCaretApplied();
   });
@@ -636,7 +686,11 @@ export function PromptEditor(props: PromptEditorProps) {
   let measureQueued = false;
   // The editor scrolls the caret into view after a change, a frame or two later: measure again once it has.
   let settleTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastWrapperWidth = -1;
   function measureHeaders() {
+    const live = session();
+    const structuredDoc = untracked(rich) && (live.doc.content ?? []).some((node) => node.type !== "paragraph");
+    if (!structuredDoc && untracked(headers).length === 0 && untracked(contentHeight) === 0) return;
     if (settleTimer) clearTimeout(settleTimer);
     settleTimer = setTimeout(() => { settleTimer = null; measureNow(); }, 150);
     measureNow();
@@ -648,8 +702,6 @@ export function PromptEditor(props: PromptEditorProps) {
       measureQueued = false;
       const live = session();
       const blocks = untracked(rich) ? codeBlocks(live.doc) : [];
-      // The block's first character in the editor's content coordinates (measured unscrolled: while the editor is
-      // scrolled the header can sit off; see the report). A header outside the editor's box is not drawn.
       const structuredDoc = untracked(rich) && (live.doc.content ?? []).some((node) => node.type !== "paragraph");
       void ((blocks.length || structuredDoc) && wrapperRef ? wrapperRef.measure() : Promise.resolve(null)).then((frame) => {
         const height = frame?.bounds.size.height ?? Infinity;
@@ -658,15 +710,23 @@ export function PromptEditor(props: PromptEditorProps) {
           return box && box.y - HEADER_HEIGHT >= -4 && box.y - HEADER_HEIGHT < height ? [{ ...block, x: box.x, y: box.y }] : [];
         });
         if (JSON.stringify(next) !== JSON.stringify(untracked(headers))) headers.set(next);
-        // The editor sizes itself from its lines, not from the code blocks' box padding, so a prompt with a code block
-        // was cut off; the document's real height (its end's box, plus the last block's bottom padding) holds it open.
-        // The end of the last textblock (a position the view has a caret box for).
         const endPos = offsetToPos(live.doc, docToPrompt(live.doc).length);
         let end: { y: number; height: number } | null = null;
+        let first: { y: number; height: number } | null = null;
         const structured = (live.doc.content ?? []).some((node) => node.type !== "paragraph");
-        try { end = structured ? live.coordsAtPos(endPos) as { y: number; height: number } | null : null; } catch { end = null; }
+        if (structured) {
+          try {
+            end = live.coordsAtPos(endPos) as { y: number; height: number } | null;
+            first = live.coordsAtPos(offsetToPos(live.doc, 0)) as { y: number; height: number } | null;
+          } catch {
+            end = null;
+            first = null;
+          }
+        }
         const last = (live.doc.content ?? [])[(live.doc.content ?? []).length - 1];
-        const needed = end ? Math.ceil(end.y + end.height + (last?.type === CODE_BLOCK_NODE ? 14 : last?.type === "paragraph" ? 0 : 10)) : 0;
+        const firstBlockTop = live.doc.content?.[0]?.type === CODE_BLOCK_NODE ? 32 : 0;
+        const scrollTop = first && first.y < firstBlockTop ? first.y - firstBlockTop : 0;
+        const needed = end ? Math.ceil(end.y - scrollTop + end.height + (last?.type === CODE_BLOCK_NODE ? 14 : last?.type === "paragraph" ? 0 : 10)) : 0;
         if (needed !== untracked(contentHeight)) contentHeight.set(needed);
       });
     });
@@ -701,7 +761,7 @@ export function PromptEditor(props: PromptEditorProps) {
   };
   // One row per session: a new session (rebound shortcuts) makes a new view, as RichEditor requires.
   return (
-    <View class="relative w-full" ref={(node: ViewRef) => { wrapperRef = node; }} onLayout={() => measureHeaders()}>
+    <View class="relative w-full" ref={(node: ViewRef) => { wrapperRef = node; }} onLayout={(event) => { const width = event.bounds.size.width; if (width !== lastWrapperWidth) { lastWrapperWidth = width; measureHeaders(); requestAnimationFrame(() => readEdges(session())); } }}>
     <Each of={[current()]}>{(item) => (
     <RichEditor
       ref={(node: RichEditorRef) => { editorRef = node; }}
@@ -713,7 +773,7 @@ export function PromptEditor(props: PromptEditorProps) {
       onFocus={() => { if (!focusedNow) noteEditorFocus(true); focusedNow = true; props.onFocus(); }}
       onBlur={() => { caretAtBlur = { pos: Number(session().selection.head ?? 0), text: lastText }; if (focusedNow) noteEditorFocus(false); const waiting = entry.waiters.splice(0); for (const resolve of waiting) resolve(); focusedNow = false; props.onBlur(); if (pendingSwap) requestAnimationFrame(() => requestAnimationFrame(() => pendingSwap?.())); }}
       onPasteFiles={(event) => pasted(event.paste)}
-      onSelectionChange={() => { readCaret(session()); measureHeaders(); syncReveal(); }}
+      onSelectionChange={() => { const live = session(); const key = selectionKey(live); if (key === lastSelectionKey) return; lastSelectionKey = key; readCaret(live); measureHeaders(); syncReveal(); }}
       class="w-full bg-transparent text-foreground leading-relaxed"
       style={{ minHeight: Math.min(props.maxHeight, Math.max(props.minHeight, contentHeight())), maxHeight: props.maxHeight, ...props.textStyle() }}
       classes={{

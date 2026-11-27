@@ -213,7 +213,7 @@ export function unknownThreadLinkLabel(environmentId: string | null, messageEnvi
   return environmentId === null || environmentId === messageEnvironmentId ? "Thread no longer available" : "Thread on another machine";
 }
 
-export function ThreadChip(props: { data: () => ThreadChipData }) {
+export function ThreadChip(props: { data: () => ThreadChipData; maxLabelWidth?: () => number }) {
   const shell = () => threadById(props.data().threadId);
   // MarkdownThreadLink.tsx: a thread the shell lacks is looked up (getThreadLinkMetadata); it is unresolved only once
   // the server answered without it.
@@ -224,6 +224,7 @@ export function ThreadChip(props: { data: () => ThreadChipData }) {
   return thread() ? (
     <ChipShell
       kind="thread"
+      maxLabelWidth={props.maxLabelWidth}
       icon={<TimelineIcon name="message-square" size={12} tint={chipColor("thread") ?? undefined} />}
       label={label()}
       accessibilityLabel={`Thread ${label()}`}
@@ -249,7 +250,7 @@ export function ThreadChip(props: { data: () => ThreadChipData }) {
 // ---- skills ----
 
 /** SkillChipPopover: the skill's name and description, and View instructions when its file is known. */
-export function SkillChip(props: { data: () => SkillChipData }) {
+export function SkillChip(props: { data: () => SkillChipData; maxLabelWidth?: () => number }) {
   const open = signal(false);
   useOverlayOpen(open, "skill chip popover");
   const skill = (): InlineSkill => props.data().skill;
@@ -272,7 +273,7 @@ export function SkillChip(props: { data: () => SkillChipData }) {
         trigger={
           <View class="flex-row items-center gap-[3px] rounded-sm" accessibilityLabel={`Skill ${label()}. Show details`} role="button" tooltip={`Skill ${label()}`}>
             <TimelineIcon name="package" size={12} tint={chipColor("skill") ?? undefined} />
-            <Text class="max-w-72 truncate font-medium leading-none" style={{ color: chipColor("skill") ?? undefined }}>{label()}</Text>
+            <Text class="truncate font-medium leading-none" style={{ maxWidth: props.maxLabelWidth?.() ?? 288, color: chipColor("skill") ?? undefined }}>{label()}</Text>
           </View>
         }
       >
@@ -293,7 +294,7 @@ export function SkillChip(props: { data: () => SkillChipData }) {
 // ---- models ----
 
 /** ModelMentionChip: the model's name with its provider's mark; the popover names the model, its provider and the source text. */
-export function ModelChip(props: { data: () => ModelChipData }) {
+export function ModelChip(props: { data: () => ModelChipData; maxLabelWidth?: () => number }) {
   const open = signal(false);
   useOverlayOpen(open, "model chip popover");
   const presentation = () => props.data().presentation;
@@ -307,7 +308,7 @@ export function ModelChip(props: { data: () => ModelChipData }) {
         trigger={
           <View class="flex-row items-center gap-[3px] rounded-sm" accessibilityLabel={`Model ${presentation().label}. Show details`} role="button" tooltip={`Model ${presentation().label}`}>
             <ProviderIconView driver={presentation().driver} instanceId={presentation().instanceId} name={presentation().providerDisplayName} accentColor={presentation().accentColor} size={14} />
-            <Text class="max-w-72 truncate font-medium leading-none" style={{ color: color() }}>{presentation().label}</Text>
+            <Text class="truncate font-medium leading-none" style={{ maxWidth: props.maxLabelWidth?.() ?? 288, color: color() }}>{presentation().label}</Text>
           </View>
         }
       >
@@ -324,7 +325,7 @@ export function ModelChip(props: { data: () => ModelChipData }) {
 // ---- citations ----
 
 /** AssistantCitationChip (message variant): the quote in a popover, with Go to source. */
-export function CitationChip(props: { data: () => CitationChipData; reply?: boolean; agentTitles?: readonly string[] }) {
+export function CitationChip(props: { data: () => CitationChipData; reply?: boolean; agentTitles?: readonly string[]; maxLabelWidth?: () => number }) {
   const open = signal(false);
   useOverlayOpen(open, "citation chip popover");
   const citation = (): AssistantCitation => props.data().citation;
@@ -342,7 +343,7 @@ export function CitationChip(props: { data: () => CitationChipData; reply?: bool
         trigger={
           <View class="flex-row items-center gap-[3px] rounded-sm" accessibilityLabel={`${props.reply ? "Reply to response" : "Quoted assistant text"}: ${label()}. Show details`} role="button" tooltip={serializeAssistantCitation(citation()).length > 0 ? label() : undefined}>
             <TimelineIcon name="quote" size={12} tint={chipColor("citation") ?? undefined} />
-            <Text class="max-w-72 truncate font-medium leading-none" style={{ color: chipColor("citation") ?? undefined }}>{label()}</Text>
+            <Text class="truncate font-medium leading-none" style={{ maxWidth: props.maxLabelWidth?.() ?? 288, color: chipColor("citation") ?? undefined }}>{label()}</Text>
           </View>
         }
       >
@@ -436,7 +437,7 @@ export function externalLinkMenuItems(url: string, handlers: { openExternal: (ur
 }
 
 /** A short web link: a favicon and its text in the link colour; a press opens it, a right press has the reference's link menu. */
-export function WebLinkChip(props: { data: () => WebChipData; onOpen: (url: string) => void; openExternal: (url: string) => void; openInApp: ((url: string) => void) | null }) {
+export function WebLinkChip(props: { data: () => WebChipData; onOpen: (url: string) => void; openExternal: (url: string) => void; openInApp: ((url: string) => void) | null; maxLabelWidth?: () => number }) {
   return (
     <View
       class="flex-row items-center gap-[3px] rounded-sm"
@@ -448,7 +449,7 @@ export function WebLinkChip(props: { data: () => WebChipData; onOpen: (url: stri
       onContextMenu={((event: { pagePosition: { x: number; y: number } }) => { const url = props.data().url; const action = openThreadLinkAction(url); const threadId = openThread()?.id ?? null; void popupOverOverlay(externalLinkMenuItems(url, { openExternal: props.openExternal, openInApp: props.openInApp, threadLink: action && threadId ? { action, run: (linked) => updateThreadPullRequestLink(threadId, url, linked) } : undefined }), event.pagePosition, "link menu"); }) as never}
     >
       <Favicon host={props.data().host} />
-      <Text class="leading-none text-info-foreground">{props.data().label}</Text>
+      <Text class={props.maxLabelWidth ? "truncate leading-none text-info-foreground" : "leading-none text-info-foreground"} style={props.maxLabelWidth ? { maxWidth: props.maxLabelWidth() } : undefined}>{props.data().label}</Text>
     </View>
   );
 }

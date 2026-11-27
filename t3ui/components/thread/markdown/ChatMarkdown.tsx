@@ -36,7 +36,7 @@ import { resolveModelMention } from "./modelMentionPresentation";
 import { CitationChip, FileChip, ModelChip, openFilePath, SkillChip, ThreadChip, WebLinkChip } from "./MarkdownChips";
 import { renderCodexInlineDirectivesAsMarkdown, splitCodexArtifactTemplateMarkdown, type CodexArtifactTemplate } from "./codexDirectives";
 import { collectMarkdownGallery, type ExpandedMediaItem } from "./mediaSources";
-import { inlinePlainText, labelFileChips, transformMarkdownBlocks, type CitationChipData, type FileChipData, type InlineCodeData, type InlineContext, type InlineSkill, type ModelChipData, type SkillChipData, type ThreadChipData, type WebChipData } from "./markdownInline";
+import { inlinePlainText, labelFileChips, tableCellLabelMaxWidth, transformMarkdownBlocks, type CitationChipData, type FileChipData, type InlineCodeData, type InlineContext, type InlineSkill, type ModelChipData, type SkillChipData, type TableColumnBounds, type ThreadChipData, type WebChipData } from "./markdownInline";
 import { resolveMarkdownFileLinkMeta, type MarkdownFileLinkMeta } from "./fileLinkMeta";
 import { taskMarkerOffsets } from "./markdownTaskList";
 import { mentionableMachines, storeThreadKey } from "../../../environments/machineMentions";
@@ -77,7 +77,7 @@ export const CHAT_MARKDOWN_CLASSES: TextViewClasses = {
   rule: "my-0 border-t border-border",
   table: "my-0",
   tableRow: "border-b border-border-60",
-  tableCell: "px-3 py-[7px] text-sm",
+  tableCell: "min-w-0 overflow-hidden px-3 py-[7px] text-sm",
   tableHeaderCell: "text-sm font-semibold text-foreground",
   details: "my-0 border-y border-border-60",
   summary: "py-1 text-sm font-medium",
@@ -405,13 +405,32 @@ function InlineCodePill(props: { data: () => InlineCodeData }) {
 function MarkdownCustom(props: { node: TextViewCustomNode; env: MarkdownEnv }) {
   const node = props.node;
   const env = props.env;
+  const tableWidth = (column?: TableColumnBounds) => column ? () => tableCellLabelMaxWidth(column, env.fileLinkWidth?.() ?? 600) : undefined;
   switch (node.name) {
-    case "filelink": return <FileChip data={() => node.data as FileChipData} threadId={env.threadId} maxLabelWidth={env.fileLinkWidth} />;
-    case "threadlink": return <ThreadChip data={() => node.data as ThreadChipData} />;
-    case "skill": return <SkillChip data={() => node.data as SkillChipData} />;
-    case "model": return <ModelChip data={() => node.data as ModelChipData} />;
-    case "citation": return <CitationChip data={() => node.data as CitationChipData} />;
-    case "weblink": return <WebLinkChip data={() => node.data as WebChipData} onOpen={openMarkdownLink} openExternal={openExternalUrl} openInApp={currentWorkspace() !== null ? openBrowserAction : null} />;
+    case "filelink": {
+      const data = node.data as FileChipData;
+      return <FileChip data={() => data} threadId={env.threadId} maxLabelWidth={tableWidth(data.tableColumn) ?? env.fileLinkWidth} />;
+    }
+    case "threadlink": {
+      const data = node.data as ThreadChipData;
+      return <ThreadChip data={() => data} maxLabelWidth={tableWidth(data.tableColumn)} />;
+    }
+    case "skill": {
+      const data = node.data as SkillChipData;
+      return <SkillChip data={() => data} maxLabelWidth={tableWidth(data.tableColumn)} />;
+    }
+    case "model": {
+      const data = node.data as ModelChipData;
+      return <ModelChip data={() => data} maxLabelWidth={tableWidth(data.tableColumn)} />;
+    }
+    case "citation": {
+      const data = node.data as CitationChipData;
+      return <CitationChip data={() => data} maxLabelWidth={tableWidth(data.tableColumn)} />;
+    }
+    case "weblink": {
+      const data = node.data as WebChipData;
+      return <WebLinkChip data={() => data} maxLabelWidth={tableWidth(data.tableColumn)} onOpen={openMarkdownLink} openExternal={openExternalUrl} openInApp={currentWorkspace() !== null ? openBrowserAction : null} />;
+    }
     case "inlinecode": return <InlineCodePill data={() => node.data as InlineCodeData} />;
     default: return <ContextChip node={node} records={env.contexts} onOpenAttachment={env.onOpenAttachment} />;
   }

@@ -2,6 +2,7 @@
 // Save securely and Decline, sent through `secrets.answerRequest`. The typed value only ever lives in the field and the request.
 import { openUrl, signal, Text, View } from "nsh";
 import { Input } from "nsh/base";
+import { chatWidthClass } from "../layout";
 import { requestBackend, serverSecretRequestReferences } from "../../../store";
 import { serverSettings } from "../../../pages/settings/settingsState";
 import { createAnchor, Popup } from "../../composer/Popover";
@@ -63,7 +64,7 @@ export function SecretRequestCard(props: { id: string; request: () => SecretRequ
     void answer({ type: "reference", source: current, reference: reference() });
   };
   return (
-    <View class="min-w-0 px-1 py-0.5">
+    <View class={`mx-auto w-full min-w-0 px-1 py-0.5 ${chatWidthClass()}`}>
       {answered() ? (
         <View class="min-h-6 flex-row items-center gap-2" accessibilityLabel="Secret request">
           <View class="size-4 items-center justify-center">

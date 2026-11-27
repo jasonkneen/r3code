@@ -1,6 +1,8 @@
 import { describe, expect, test } from "nsh/test";
 
 import {
+  joinParagraphAfterListAtStart,
+  liftBlockPrefixAtStart,
   listContinuationForEnter as enterEdit,
   listIndentForTab as indentEdit,
   listOutdentForTab as outdentEdit,
@@ -170,5 +172,47 @@ describe("composer list renumbering", () => {
     const value = '1. a\n2. @"file\n2. name" \n3. b';
     const edit = listContinuationForEnter(value, value.indexOf("\n"))!;
     expect(applyEdit(value, edit)).toBe('1. a\n2. \n3. @"file\n2. name" \n4. b');
+  });
+});
+
+describe("liftBlockPrefixAtStart", () => {
+  test("lifts ordered list prefixes even when item text starts with extra whitespace", () => {
+    const value = "1.  [image.png](t3-context://v1/file/img_1)\n2. second";
+    expect(liftBlockPrefixAtStart(value, 3, ranges(value))).toEqual({
+      text: " [image.png](t3-context://v1/file/img_1)\n2. second",
+      caret: 0,
+    });
+    expect(liftBlockPrefixAtStart(value, 4, ranges(value))).toEqual({
+      text: "[image.png](t3-context://v1/file/img_1)\n2. second",
+      caret: 0,
+    });
+  });
+
+  test("lifts empty ordered, bullet, task, and heading prefixes and ignores mid-line offsets", () => {
+    expect(liftBlockPrefixAtStart("1. ", 3)).toEqual({ text: "", caret: 0 });
+    expect(liftBlockPrefixAtStart("1. a\n2. ", 8)).toEqual({ text: "1. a\n", caret: 5 });
+    expect(liftBlockPrefixAtStart("-  hello", 2)).toEqual({ text: " hello", caret: 0 });
+    expect(liftBlockPrefixAtStart("- [ ]  task", 6)).toEqual({ text: " task", caret: 0 });
+    expect(liftBlockPrefixAtStart("##  title", 3)).toEqual({ text: " title", caret: 0 });
+    expect(liftBlockPrefixAtStart("1. hello", 5)).toBeNull();
+  });
+});
+
+describe("joinParagraphAfterListAtStart", () => {
+  test("deletes the empty line after a list and returns caret to the last item", () => {
+    expect(joinParagraphAfterListAtStart("1. first\n", 9)).toEqual({ text: "1. first", caret: 8 });
+    expect(joinParagraphAfterListAtStart("1. \n", 4)).toEqual({ text: "1. ", caret: 3 });
+  });
+
+  test("joins non-empty prose or collapses an empty gap paragraph after a list", () => {
+    expect(joinParagraphAfterListAtStart("1. first\n\nafter", 10)).toEqual({ text: "1. firstafter", caret: 8 });
+    expect(joinParagraphAfterListAtStart("1. first\n\n\nafter", 10)).toEqual({ text: "1. first\n\nafter", caret: 8 });
+    expect(joinParagraphAfterListAtStart("1.\n\nafter", 4)).toEqual({ text: "1. after", caret: 3 });
+    expect(joinParagraphAfterListAtStart("-\n\nafter", 3)).toEqual({ text: "- after", caret: 2 });
+    expect(joinParagraphAfterListAtStart("- [ ]\n\nafter", 7)).toEqual({ text: "- [ ] after", caret: 6 });
+    expect(joinParagraphAfterListAtStart("-   [ ]\n\nafter", 9)).toEqual({ text: "-   [ ] after", caret: 8 });
+    expect(joinParagraphAfterListAtStart("\t-\t[x]\n\nafter", 8)).toEqual({ text: "\t-\t[x] after", caret: 7 });
+    expect(joinParagraphAfterListAtStart("1.\n\n after", 4)).toEqual({ text: "1. after", caret: 2 });
+    expect(joinParagraphAfterListAtStart("1. first", 8)).toBeNull();
   });
 });

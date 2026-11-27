@@ -3,7 +3,7 @@ import { expect, test } from "nsh/test";
 import { applyShellEventForTest, updateSetting } from "../../store";
 import { replaceServerSettings, resetServerConfig } from "../../pages/settings/settingsState";
 import { settledShelfExpanded, toggleSettledShelf } from "./sidebarPrefs";
-import { hiddenSettledCount, sidebarSections, visibleSettled } from "./sidebarModel";
+import { hiddenSettledCount, settledThreadCount, sidebarSections, visibleSettled } from "./sidebarModel";
 
 const NOW = Date.parse("2026-11-11T22:00:00Z");
 const iso = (hoursAgo: number) => new Date(NOW - hoursAgo * 3_600_000).toISOString();
@@ -67,4 +67,20 @@ test("a settled thread with no activity timestamp falls back to its updated time
     shell("newer", { settledOverride: "settled", settledAt: null, latestUserMessageAt: null, latestRunCompletedAt: null, updatedAt: iso(1) }),
   ]);
   expect(sidebarSections(NOW).settled.map((thread) => thread.id)).toEqual(["newer", "older"]);
+});
+
+test("cross-environment delegatedFrom threads with null lineage relationship are unlisted", () => {
+  updateSetting("boringSidebarEnabled", false);
+  resetServerConfig();
+  const delegatedFrom = { environmentId: "env-parent", threadId: "parent-1", title: "Parent" };
+  load([
+    shell("active-normal"),
+    shell("active-delegated", { delegatedFrom }),
+    shell("settled-normal", { settledOverride: "settled", settledAt: iso(1), delegatedFrom: null }),
+    shell("settled-delegated", { settledOverride: "settled", settledAt: iso(0.5), delegatedFrom }),
+  ]);
+  const s = sidebarSections(NOW);
+  expect(s.loose.map((thread) => thread.id)).toEqual(["active-normal"]);
+  expect(s.settled.map((thread) => thread.id)).toEqual(["settled-normal"]);
+  expect(settledThreadCount(s)).toBe(1);
 });

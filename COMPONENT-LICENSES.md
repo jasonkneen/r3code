@@ -58,6 +58,50 @@ assets. Headers in each file name the upstream path they came from.
 - `t3ui/desktop/snapShotSounds.ts` — base64 of upstream
   `apps/web/src/assets/snap-shot-whoosh.mp3` and `snap-shot-click.mp3`.
 
+### Ported upstream modules, wire contracts and verbatim copy
+
+Modules carrying ported upstream logic, verbatim UI copy/labels, or matching
+wire contracts from upstream T3 Code.
+
+- `t3ui/components/composer/editor/listContinuation.ts` and
+  `t3ui/components/composer/editor/listContinuation.test.ts` — ported from
+  upstream `composer-list-continuation.ts` and its test cases.
+- `t3ui/components/composer/editor/promptDocument.ts` and
+  `t3ui/components/composer/editor/richPromptDocument.test.ts` — ported from
+  upstream `composer-rich-text-doc.ts`, `composerInlineTokens.ts`, and
+  `composer-rich-text-doc.test.ts`.
+- `t3ui/components/composer/editor/PromptEditor.tsx` — carries upstream
+  composer Markdown/rich-text rules and copy (`ComposerPromptEditorTiptap`).
+- `t3ui/components/thread/MessageRow.tsx` — carries upstream message row action
+  labels and tooltips.
+- `t3ui/pages/settings/Connection.tsx` — carries upstream connection diagnosis
+  copy and labels.
+- `t3ui/environments/connectionManager.ts` and
+  `t3ui/environments/mergedShell.test.ts` — carries verbatim
+  `connectionStatusText` copy from upstream `connection/presentation.ts` and
+  matching upstream scoped environment shell/RPC wire contracts and fixtures
+  (`orchestration.subscribeShell`, `orchestration.getOlderSettledThreads`,
+  `subscribeServerConfig`).
+- `t3ui/store.ts` — carries matching upstream shell and orchestration RPC wire
+  contracts (including `orchestration.getOlderSettledThreads` and
+  `olderSettled` snapshot cuts).
+- `t3ui/components/Sidebar.tsx` and `t3ui/components/SidebarThreadRow.tsx` —
+  carry upstream sidebar section/row labels and settled-shelf copy.
+- `t3ui/components/sidebar/subagentRequests.ts` and
+  `t3ui/components/sidebar/sidebarSettled.test.ts` — mirror upstream
+  `pendingSubagentRequestsByThread` / `isListedThreadLineage` rules and shell
+  wire contract fixtures.
+- `t3ui/components/thread/timeline/SecretRequestCard.tsx` — carries upstream
+  secret-request copy/labels and the `secrets.answerRequest` wire contract.
+- `t3ui/components/thread/markdown/ChatMarkdown.tsx` — carries upstream
+  `.chat-markdown` styling rules and table copy labels.
+- `t3ui/components/thread/markdown/MarkdownChips.tsx` — carries upstream
+  inline chip labels, fallback copy (`unknownThreadLinkLabel`) and link menus.
+- `t3ui/components/thread/markdown/markdownInline.ts` and
+  `t3ui/components/thread/markdown/markdownInline.test.ts` — mirror upstream
+  `inlineSkills.ts` token matching, inline link/chip rewriting and
+  `t3-thread://` / `t3-citation://` link formats.
+
 ### Upstream assets (icons and glyphs)
 
 Extracted from the upstream app or its icon set; names and shapes are upstream's.

@@ -33,6 +33,7 @@ import {
   toggleSidebar,
   sidebarThreadQuery,
   utilityPage,
+  canLoadOlderSettled,
   loadOlderSettledPage,
   olderSettledStatus,
   retryOlderSettledPage,
@@ -210,7 +211,7 @@ export function Sidebar() {
   // olderSettledShelf useOlderSettledShelfGrowth: an open shelf reads older pages while its rows cannot fill what it shows.
   effect(() => {
     const scope = projectScopeIds();
-    if (!settledShelfExpanded() || olderSettledStatus() !== "ready" || unloadedOlderSettledCount(new Set(scope)) === 0) return;
+    if (!settledShelfExpanded() || olderSettledStatus(scope) !== "ready" || unloadedOlderSettledCount(new Set(scope)) === 0) return;
     if (sidebarSections(Date.now()).settled.length < settledVisibleCount()) void loadOlderSettledPage(scope);
   });
   // workspaceFocus: the sidebar area takes the keyboard at its search field.
@@ -451,9 +452,9 @@ export function Sidebar() {
               </MotionEach>
               {hiddenSettledCount(sections()) > 0 ? (
                 <SidebarShowMore
-                  label={olderSettledStatus() === "pending" ? "Loading" : olderSettledStatus() === "failed" ? "Could not load older threads. Retry" : `Show ${Math.min(hiddenSettledCount(sections()), SETTLED_TAIL_PAGE_COUNT)} more`}
-                  disabled={olderSettledStatus() === "pending"}
-                  onPress={() => { if (olderSettledStatus() === "failed") void retryOlderSettledPage(projectScopeIds()); showMoreSettled(); }}
+                  label={olderSettledStatus(projectScopeIds()) === "pending" ? "Loading" : olderSettledStatus(projectScopeIds()) === "failed" ? "Could not load older threads. Retry" : `Show ${Math.min(hiddenSettledCount(sections()), SETTLED_TAIL_PAGE_COUNT)} more`}
+                  disabled={olderSettledStatus(projectScopeIds()) === "pending" || (sections().settled.length <= settledVisibleCount() && !canLoadOlderSettled(projectScopeIds()))}
+                  onPress={() => { if (olderSettledStatus(projectScopeIds()) === "failed") void retryOlderSettledPage(projectScopeIds()); showMoreSettled(); }}
                 />
               ) : null}
             </View>

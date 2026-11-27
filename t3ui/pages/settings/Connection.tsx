@@ -300,8 +300,6 @@ export function SavedSessionPermissions(props: { url: string; connected: boolean
 
 const HOP_MARK = { ok: "\u2713", failed: "\u2715", unchecked: "\u2013" } as const;
 const HOP_NOTE = { ok: "", failed: "Failed", unchecked: "Not checked" } as const;
-const nowSecond = signal(Date.now());
-setInterval(() => nowSecond.set(Date.now()), 1000);
 
 /** useConnectionDiagnosis for a saved environment: null while it is connected, off, or has not failed. */
 export function savedEnvironmentDiagnosis(environment: SavedEnvironment): ConnectionDiagnosis | null {
@@ -321,6 +319,13 @@ export function savedEnvironmentDiagnosis(environment: SavedEnvironment): Connec
 
 /** ConnectionDiagnosisSummary: the headline, the retry state and the Details toggle. */
 function DiagnosisSummary(props: { diagnosis: ConnectionDiagnosis; retryAt: number | null; attempt: number; expanded: boolean; onToggle: () => void }) {
+  const nowSecond = signal(Date.now());
+  effect(() => {
+    if (props.retryAt === null) return;
+    nowSecond.set(Date.now());
+    const timer = setInterval(() => nowSecond.set(Date.now()), 1000);
+    return () => clearInterval(timer);
+  });
   const seconds = () => (props.retryAt === null ? 0 : Math.ceil((props.retryAt - nowSecond()) / 1000));
   return (
     <View class="gap-0.5">
