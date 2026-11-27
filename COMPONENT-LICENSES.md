@@ -47,6 +47,8 @@ assets. Headers in each file name the upstream path they came from.
   `components/settings/settingsSearch.ts`.
 - `t3ui/pages/Settings.tsx` — populated from the generated nav/panel data, so
   its labels are upstream's shipped labels.
+- `t3ui/pages/settings/OpenSourceLicenses.tsx` — ported from upstream
+  `components/settings/OpenSourceLicenses.tsx`.
 - `t3ui/themePaletteData.ts` — generated from upstream
   `packages/shared/src/themePalettes.ts`.
 - `t3ui/themePreviews.ts` — generated from the same upstream palette source.
@@ -55,8 +57,73 @@ assets. Headers in each file name the upstream path they came from.
   behaviour mirrors upstream's `RpcClient`.
 - `t3ui/backend/rpcConcurrency.ts` — mirrors upstream client-runtime
   `state/runtime.ts` command-scheduler semantics and keying.
+- `t3ui/cloud/connectAuth.ts`, `t3ui/cloud/connectSession.ts`,
+  `t3ui/cloud/ConnectSignIn.tsx`, `t3ui/cloud/relayDiscovery.ts`,
+  `t3ui/cloud/connectAuth.test.ts`, and `t3ui/cloud/t3Connect.test.ts` —
+  implement and test upstream T3 Connect OAuth/PKCE, sign-in copy, and relay
+  DPoP wire contracts from `packages/shared/src/connectAuth.ts`,
+  `apps/server/src/cloud/CliTokenManager.ts`,
+  `packages/client-runtime/src/relay/discovery.ts`, and
+  `apps/web/src/cloud/dpop.ts`.
+- `t3ui/components/thread/timeline/worktreeSetup.ts` — mirrors upstream
+  `packages/contracts` `WorktreeSetupSnapshot`, `client-runtime`
+  `worktreeSetup.ts`, and `MessagesTimeline.logic.ts` labels.
+- `t3ui/pages/settings/liveThemeGenerator.ts` — generates the theme override
+  JSON matching `t3ui/theme.json`'s upstream token vocabulary and CSS variable
+  mapping from `t3ui/themePaletteData.ts`.
 - `t3ui/desktop/snapShotSounds.ts` — base64 of upstream
   `apps/web/src/assets/snap-shot-whoosh.mp3` and `snap-shot-click.mp3`.
+
+### Ported upstream modules, wire contracts and verbatim copy
+
+Modules carrying ported upstream logic, verbatim UI copy/labels, or matching
+wire contracts from upstream T3 Code.
+
+- `t3ui/components/composer/editor/listContinuation.ts` and
+  `t3ui/components/composer/editor/listContinuation.test.ts` — ported from
+  upstream `composer-list-continuation.ts` and its test cases.
+- `t3ui/components/composer/editor/promptDocument.ts` and
+  `t3ui/components/composer/editor/richPromptDocument.test.ts` — ported from
+  upstream `composer-rich-text-doc.ts`, `composerInlineTokens.ts`, and
+  `composer-rich-text-doc.test.ts`.
+- `t3ui/components/composer/editor/PromptEditor.tsx` — carries upstream
+  composer Markdown/rich-text rules and copy (`ComposerPromptEditorTiptap`).
+- `t3ui/components/thread/MessageRow.tsx` — carries upstream message row action
+  labels and tooltips.
+- `t3ui/pages/settings/Connection.tsx` — carries upstream connection diagnosis
+  copy and labels.
+- `t3ui/environments/connectionManager.ts` and
+  `t3ui/environments/mergedShell.test.ts` — carries verbatim
+  `connectionStatusText` copy from upstream `connection/presentation.ts` and
+  matching upstream scoped environment shell/RPC wire contracts and fixtures
+  (`orchestration.subscribeShell`, `orchestration.getOlderSettledThreads`,
+  `subscribeServerConfig`).
+- `t3ui/store.ts` and `t3ui/thread-history.test.ts` — carry matching upstream
+  shell, history pagination, and orchestration RPC wire contracts and fixtures
+  (including `orchestration.getOlderSettledThreads` and `olderSettled` snapshot
+  cuts).
+- `t3ui/components/Sidebar.tsx` and `t3ui/components/SidebarThreadRow.tsx` —
+  carry upstream sidebar section/row labels and settled-shelf copy.
+- `t3ui/components/sidebar/subagentRequests.ts` and
+  `t3ui/components/sidebar/sidebarSettled.test.ts` — mirror upstream
+  `pendingSubagentRequestsByThread` / `isListedThreadLineage` rules and shell
+  wire contract fixtures.
+- `t3ui/components/thread/timeline/SecretRequestCard.tsx` — carries upstream
+  secret-request copy/labels and the `secrets.answerRequest` wire contract.
+- `t3ui/components/thread/markdown/ChatMarkdown.tsx` — carries upstream
+  `.chat-markdown` styling rules and table copy labels.
+- `t3ui/components/thread/markdown/MarkdownChips.tsx` — carries upstream
+  inline chip labels, fallback copy (`unknownThreadLinkLabel`) and link menus.
+- `t3ui/components/thread/markdown/markdownInline.ts` and
+  `t3ui/components/thread/markdown/markdownInline.test.ts` — mirror upstream
+  `inlineSkills.ts` token matching, inline link/chip rewriting and
+  `t3-thread://` / `t3-citation://` link formats.
+- `t3ui/components/motion/Motion.tsx`, `t3ui/components/motion/Motion.test.tsx`,
+  `t3ui/components/sidebar/Spinner.tsx`, and
+  `t3ui/components/thread/timeline/Shimmer.tsx` — mirror upstream motion,
+  spinner, and working-shimmer helpers and labels.
+- `t3ui/components/thread/markdown/shikiHighlight.ts` — ports upstream
+  `readableSyntaxColor` and Shiki code-block highlighting behaviour.
 
 ### Upstream assets (icons and glyphs)
 

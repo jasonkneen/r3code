@@ -7,7 +7,7 @@ import { linkedEnvironments } from "../environments/linkedEnvironments";
 import { pendingLoadBalancingSendWarning } from "../environments/loadBalancing";
 import { projectCloneSendBlockReason } from "./palette/addProject/addProjectState";
 import { releaseThreadUndoShortcut } from "./sidebar/threadUndoClaim";
-import { cleanup, colorScheme, computed, effect, keymap, signal, Speech, Text, untracked, View } from "nsh";
+import { cleanup, colorScheme, computed, effect, keymap, platform, signal, Speech, Text, untracked, View } from "nsh";
 import type { ViewRef } from "nsh";
 import { registerFocusArea } from "../commands/workspaceFocus";
 import { workLocallyResendDraftId, workLocallyStep } from "./thread/timeline/worktreeWorkLocally";
@@ -1148,7 +1148,7 @@ requestAnimationFrame(() => { if (composerOwner() !== (scoped ? openThread()?.id
         // outline drawn inside (ComposerSurface's after:border), and --shadow-composer in light only (dark:shadow-none).
         style={{
           backgroundColor: dragOver() ? tokenAlpha("accent", 0.45) : composerGlassSurface(),
-          backdropFilter: colorScheme() === "dark" ? "blur(16px) saturate(1.08)" : "blur(12px) saturate(1.14)",
+          ...(platform.os === "windows" ? {} : { backdropFilter: colorScheme() === "dark" ? "blur(16px) saturate(1.08)" : "blur(12px) saturate(1.14)" }),
           boxShadow: dragOver() ? `inset 0 0 0 1px ${tokenAlpha("primary", 0.7)}` : colorScheme() === "dark"
             ? `inset 0 0 0 1px ${composerOutline()}, inset 0 1px 2px ${composerHighlight()}${ultrathinkSurface()}`
             : `0 1px 2px rgba(0,0,0,0.05), inset 0 0 0 1px ${composerOutline()}${ultrathinkSurface()}`,

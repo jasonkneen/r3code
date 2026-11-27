@@ -4,7 +4,7 @@
 // first block in its language (a few ms); fences Shiki has no grammar for, or a tokenizer error,
 // fall back to the regex highlighter (highlight.ts). Colours are pierre-light / pierre-dark; light
 // colours are darkened like the reference's t3-light theme (lib/readableSyntaxTheme.ts).
-import { signal } from "nsh";
+import { host, platform, signal } from "nsh";
 // @ts-ignore vendored build without types
 import { shikiHasLanguage, shikiLoadLanguageSync, shikiTokens, shikiTokensFromState } from "../../../vendor/shiki/shiki.js";
 import { highlightCode, type HighlightToken } from "./highlight";
@@ -153,9 +153,17 @@ function pump() {
   if (jobs.size > 0) pumpTimer = setTimeout(pump, 4);
 }
 
+function tokenCacheLimit(): number {
+  try { return platform.os === "windows" ? 64 : 128; } catch { return 128; }
+}
+function lineCacheLimit(): number {
+  try { return platform.os === "windows" ? 128 : 512; } catch { return 512; }
+}
+
 function remember(key: string, lines: RawLine[]) {
+  tokenCache.delete(key);
   tokenCache.set(key, lines);
-  if (tokenCache.size > 512) tokenCache.delete(tokenCache.keys().next().value as string);
+  if (tokenCache.size > tokenCacheLimit()) tokenCache.delete(tokenCache.keys().next().value as string);
 }
 
 /** The block's Shiki lines so far (all of them once done), or null when Shiki cannot tokenize it. */
@@ -186,7 +194,7 @@ const regexLines = new Map<string, ShikiToken[][]>();
 const shikiLines = new Map<string, (ShikiToken[] | undefined)[]>();
 function bounded<T>(map: Map<string, T>, key: string, make: () => T): T {
   let value = map.get(key);
-  if (value === undefined) { value = make(); map.set(key, value); if (map.size > 512) map.delete(map.keys().next().value as string); }
+  if (value === undefined) { value = make(); map.set(key, value); if (map.size > lineCacheLimit()) map.delete(map.keys().next().value as string); }
   return value;
 }
 
@@ -202,6 +210,61 @@ function convert(line: RawLine, scheme: "light" | "dark"): ShikiToken[] {
   });
 }
 
+const NATIVE_MISSED_TTL_MS = 15_000;
+const NATIVE_MISSED_LIMIT = 128;
+const nativePending = new Set<string>();
+const nativeMissed = new Map<string, number>();
+
+function rememberNativeMissed(key: string): void {
+  nativeMissed.delete(key);
+  nativeMissed.set(key, Date.now() + NATIVE_MISSED_TTL_MS);
+  while (nativeMissed.size > NATIVE_MISSED_LIMIT) {
+    nativeMissed.delete(nativeMissed.keys().next().value as string);
+  }
+}
+
+function isNativeMissed(key: string): boolean {
+  const until = nativeMissed.get(key);
+  if (until === undefined) return false;
+  if (until <= Date.now()) {
+    nativeMissed.delete(key);
+    return false;
+  }
+  return true;
+}
+
+function useNativeHighlight(): boolean {
+  try { return platform.os === "windows" && host.available(); } catch { return false; }
+}
+
+function nativeTokens(code: string, id: string, key: string): RawLine[] | null {
+  const cached = tokenCache.get(key);
+  if (cached) return cached;
+  if (isNativeMissed(key)) return null;
+  let reader = pendingReaders.get(key);
+  if (!reader) { reader = signal(0); pendingReaders.set(key, reader); }
+  reader();
+  if (!nativePending.has(key)) {
+    nativePending.add(key);
+    void host.call("r3.highlight", { lang: id, code }, { timeout: 10_000 }).then((result) => {
+      nativePending.delete(key);
+      if (Array.isArray(result)) {
+        remember(key, result as RawLine[]);
+      } else {
+        rememberNativeMissed(key);
+      }
+      const next = pendingReaders.get(key);
+      pendingReaders.delete(key);
+      if (next) next.set((next() ?? 0) + 1);
+    }).catch(() => {
+      nativePending.delete(key);
+      rememberNativeMissed(key);
+      pendingReaders.delete(key);
+    });
+  }
+  return null;
+}
+
 /**
  * Tokens for a code block: Shiki's once its grammar is built (line by line as they are tokenized), else the regex
  * highlighter's. A missing grammar is queued for an idle-time build (see buildNext).
@@ -212,9 +275,14 @@ export function highlightCodeShiki(code: string, info: string | null | undefined
   const id = resolveShikiLanguage(info);
   const regex = () => bounded(regexLines, `${info ?? ""}\u0000${code}`, () => highlightCode(code, info));
   if (!id) return regex();
-  if (!warm.has(id)) { requestBuild(id); return regex(); }
   const key = `${id}\u0000${code}`;
-  const raw = rawTokens(code, id, key);
+  let raw: RawLine[] | null;
+  if (useNativeHighlight()) {
+    raw = nativeTokens(code, id, key);
+  } else {
+    if (!warm.has(id)) { requestBuild(id); return regex(); }
+    raw = rawTokens(code, id, key);
+  }
   if (!raw) return regex();
   const converted = bounded(shikiLines, `${scheme}\u0000${key}`, () => []);
   for (let index = 0; index < raw.length; index++) if (!converted[index]) converted[index] = convert(raw[index]!, scheme);

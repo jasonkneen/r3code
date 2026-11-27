@@ -12,7 +12,7 @@ import { noteFocusArea, registerFocusArea } from "../../commands/workspaceFocus"
 import { createPresence } from "../motion/Motion";
 import { EASE_IN_OUT } from "../motion/motionTokens";
 import { animatePanelLayout, panelAnimationMs } from "../motion/panelMotion";
-import { Menu } from "nsh/desktop";
+import { Menu, titleBar } from "nsh/desktop";
 import { Input, MenuItem, Menu as PopupMenu, Submenu, Tooltip } from "nsh/base";
 import { allProjects, isServerThread, openThread, requestBackend, runtimeModeFor, selectedModelFor, serverRuntimeModeFor, settingValue } from "../../store";
 import { serverEnvironment } from "../../pages/settings/settingsState";
@@ -725,7 +725,7 @@ export function RightPanel(props: { rowWidth?: () => number | undefined; windowW
   // The tab strip, the launcher and the tabs that are made again with their thread (everything but the kept pages below).
   const chrome = (inSheet: boolean) => (
     <>
-      <View class="h-[52px] shrink-0 flex-row items-center gap-1 pl-2 pr-3" accessibilityLabel="Right panel tabs" desktop={{ windowDrag: true }}>
+      <View class="h-[52px] shrink-0 flex-row items-center gap-1 pl-2" style={{ paddingRight: (inSheet ? 0 : titleBar().right) + 12 }} accessibilityLabel="Right panel tabs" desktop={{ windowDrag: true }}>
         {/* The reference's tab list is a horizontal scroll area that holds the tabs and the add button (tabs keep their size, max-w-36, and scroll). */}
         <FadeScroll
           surface="background"

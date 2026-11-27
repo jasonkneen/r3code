@@ -1,6 +1,8 @@
-// The GPUI renderer does not draw maskImage, so animate the text spans themselves.
-import { effect, signal, Text, View } from "nsh";
+import { cleanup, createMotion, effect, platform, reduceMotion, signal, Text, untracked, View } from "nsh";
+import type { MotionSpec } from "nsh";
 import { tokenOver } from "../../composer/tokenColor";
+import { isDeclarativeWindow } from "../../../desktop/windowControl";
+import { isWindowsLoopPaused } from "../../motion/Motion";
 
 const BAND = 72;
 const STEPS = 30;
@@ -17,7 +19,41 @@ export function shimmerStrength(index: number, count: number, step: number, widt
   return Math.max(0, 1 - Math.abs(position - shimmerCenter(step, width)) / (BAND / 2));
 }
 
-export function ShimmerText(props: { text: () => string; active: () => boolean; class?: string; tabular?: boolean }) {
+export function useWindowsShimmerPulse(os: string = platform.os, declarative: boolean = isDeclarativeWindow()): boolean {
+  return os === "windows" && declarative;
+}
+
+const shimmerPulse: MotionSpec = {
+  keyframes: { opacity: [1, 0.45, 1] },
+  duration: 1800,
+  easing: "easeInOut",
+  iterations: "infinite",
+  frameRate: 15,
+} as MotionSpec;
+
+function WindowsShimmerText(props: { text: () => string; active: () => boolean; class?: string; tabular?: boolean }) {
+  const motion = createMotion();
+  effect(() => {
+    const on = props.active() && !reduceMotion() && !isWindowsLoopPaused();
+    untracked(() => {
+      if (on) {
+        void motion.play(shimmerPulse);
+      } else {
+        motion.reset();
+      }
+    });
+  });
+  cleanup(() => motion.stop());
+  return (
+    <View class="min-w-0 shrink" style={motion.style}>
+      <Text class={`${props.class ?? ""} truncate text-muted-foreground ${props.tabular ? "tabular-nums" : ""}`} accessibilityLabel={props.active() ? "Working shimmer" : undefined}>
+        {props.text()}
+      </Text>
+    </View>
+  );
+}
+
+function CharacterBandShimmerText(props: { text: () => string; active: () => boolean; class?: string; tabular?: boolean }) {
   const step = signal(0);
   const width = signal(0);
   effect(() => {
@@ -34,4 +70,8 @@ export function ShimmerText(props: { text: () => string; active: () => boolean; 
       </Text>
     </View>
   );
+}
+
+export function ShimmerText(props: { text: () => string; active: () => boolean; class?: string; tabular?: boolean }) {
+  return useWindowsShimmerPulse() ? <WindowsShimmerText {...props} /> : <CharacterBandShimmerText {...props} />;
 }

@@ -27,7 +27,57 @@ export function setEnvironmentRelayRoute(route: typeof relayRoute) { relayRoute 
 /** Runs before each connect (an SSH environment's tunnel); set by environments/sshSaved.ts. */
 let preconnect: ((environment: ManagedEnvironment) => Promise<void>) | null = null;
 export function setEnvironmentPreconnect(run: ((environment: ManagedEnvironment) => Promise<void>) | null) { preconnect = run; }
-export interface EnvironmentShell { projects: Record<string, unknown>[]; threads: Record<string, unknown>[]; archived: Record<string, unknown>[]; loaded: boolean }
+export interface OlderSettledCut { before: string; asOfSequence: number; counts: { projectId: string; count: number }[] }
+export type OlderSettledStatus = "ready" | "pending" | "failed" | "done";
+export const OLDER_SETTLED_PAGE_SIZE = 25;
+
+export function readOlderSettledCut(value: unknown): OlderSettledCut | null {
+  const cut = record(value);
+  if (!cut || typeof cut.before !== "string" || typeof cut.asOfSequence !== "number" || !Array.isArray(cut.counts)) return null;
+  return {
+    before: cut.before,
+    asOfSequence: cut.asOfSequence,
+    counts: cut.counts.map(record).flatMap((entry) =>
+      entry && typeof entry.projectId === "string" && typeof entry.count === "number" ? [{ projectId: entry.projectId, count: entry.count }] : []),
+  };
+}
+
+export function olderSettledCountRowKeyFor(cut: OlderSettledCut | null, row: Record<string, unknown> | undefined): string | null {
+  if (!row || !cut) return null;
+  const lineage = record(row.lineage);
+  const created = typeof row.createdAt === "string" ? Date.parse(row.createdAt) : NaN;
+  if (lineage?.relationshipToParent === "subagent" || lineage?.sideChat === true || created >= Date.parse(cut.before)) return null;
+  if (!Number.isFinite(created)) return null;
+  const at = typeof row.settledAt === "string" ? Date.parse(row.settledAt) : NaN;
+  return `${row.id}:${row.settledOverride === "settled" && at < Date.parse(cut.before) ? 1 : 0}`;
+}
+
+export function countUnloadedOlderSettled(
+  cut: OlderSettledCut | null,
+  rows: Record<string, unknown>[],
+  projectIds?: ReadonlySet<string>,
+): number {
+  if (!cut) return 0;
+  const filter = projectIds && projectIds.size > 0 ? projectIds : undefined;
+  const total = cut.counts.reduce((sum, entry) => sum + (!filter || filter.has(entry.projectId) ? entry.count : 0), 0);
+  const before = Date.parse(cut.before);
+  const loaded = rows.filter((row) => {
+    const lineage = record(row.lineage);
+    const at = typeof row.settledAt === "string" ? Date.parse(row.settledAt) : NaN;
+    return (!filter || filter.has(String(row.projectId))) && row.settledOverride === "settled"
+      && lineage?.relationshipToParent !== "subagent" && lineage?.sideChat !== true && at < before;
+  }).length;
+  return Math.max(0, total - loaded);
+}
+
+export interface EnvironmentShell {
+  projects: Record<string, unknown>[];
+  threads: Record<string, unknown>[];
+  archived: Record<string, unknown>[];
+  loaded: boolean;
+  olderSettled?: OlderSettledCut | null;
+  olderSettledRows?: Record<string, unknown>[];
+}
 
 /** connectionStatusText (connection/presentation.ts), verbatim. */
 export function connectionStatusText(connection: EnvironmentConnection): string {
@@ -74,6 +124,8 @@ export function foldShellEvent(shell: EnvironmentShell, value: unknown): boolean
     } else {
       shell.projects = list(snapshot.projects);
       shell.threads = list(snapshot.threads);
+      shell.olderSettled = readOlderSettledCut(snapshot.olderSettled);
+      shell.olderSettledRows = [];
       shell.loaded = true;
     }
   } else if (event.kind === "project.updated") {
@@ -89,14 +141,20 @@ export function foldShellEvent(shell: EnvironmentShell, value: unknown): boolean
     const active = shell.threads.findIndex((item) => item.id === thread.id);
     const archive = shell.archived.findIndex((item) => item.id === thread.id);
     if (event.location === "active" && active >= 0 && archive < 0) shell.threads[active] = thread;
-    else if (event.location === "archive" && archive >= 0 && active < 0) shell.archived[archive] = thread;
-    else {
+    else if (event.location === "archive" && archive >= 0 && active < 0) {
+      if (shell.olderSettledRows?.length) shell.olderSettledRows = shell.olderSettledRows.filter((item) => item.id !== thread.id);
+      shell.archived[archive] = thread;
+    } else {
       shell.threads = shell.threads.filter((item) => item.id !== thread.id);
       shell.archived = shell.archived.filter((item) => item.id !== thread.id);
       if (event.location === "active") shell.threads.push(thread);
-      else if (event.location === "archive") shell.archived.push(thread);
+      else if (event.location === "archive") {
+        if (shell.olderSettledRows?.length) shell.olderSettledRows = shell.olderSettledRows.filter((item) => item.id !== thread.id);
+        shell.archived.push(thread);
+      }
     }
   } else if (event.kind === "thread.removed") {
+    if (shell.olderSettledRows?.length) shell.olderSettledRows = shell.olderSettledRows.filter((item) => item.id !== event.threadId);
     if (event.location === "active") shell.threads = shell.threads.filter((item) => item.id !== event.threadId);
     if (event.location === "archive") shell.archived = shell.archived.filter((item) => item.id !== event.threadId);
   } else return false;
@@ -118,6 +176,13 @@ interface Session {
   timer: number | undefined;
   /** supervisor.ts failedProbe: the next attempt starts at once on a reset ladder. */
   probeFailed?: boolean;
+  olderSettledStatus: OlderSettledStatus;
+  olderSettledFrontier: { settledAt: string; threadId?: string } | null;
+  olderSettledScopeKey: string;
+  olderSettledGeneration: number;
+  olderSettledCountGeneration: number;
+  olderSettledCountTimer: ReturnType<typeof setTimeout> | null;
+  olderSettledPageDropped?: Set<string> | null;
 }
 
 const sessions = new Map<string, Session>();
@@ -155,6 +220,8 @@ export function environmentServerVersion(id: string): string | null {
 export const environmentConfigs = signal<Record<string, Record<string, unknown>>>({});
 /** Bumped after any remote shell changes; readers then call remoteShell(id). */
 export const remoteShellRevision = signal(0);
+const remoteOlderSettledRevision = signal(0);
+const NONE_SCOPE_KEY = "\0none";
 
 type Opener = (url: string) => Promise<SocketConnection>;
 let openSocketOverride: Opener | null = null;
@@ -258,7 +325,10 @@ async function open(session: Session) {
             const event = { kind: "snapshot", snapshot };
             recordFamilyShellEvent(id, event);
             noteShellEvent(session.shellResume, event, identity());
-            if (foldShellEvent(session.shell, event)) remoteShellRevision.update((n) => n + 1);
+            if (foldShellEvent(session.shell, event)) {
+              resetSessionOlderSettled(session);
+              remoteShellRevision.update((n) => n + 1);
+            }
             return true;
           }),
         receive: (item) => {
@@ -270,8 +340,39 @@ async function open(session: Session) {
           }
           noteShellEvent(session.shellResume, item, identity());
           // shell.ts: snapshot-required keeps the rows and reloads (HTTP snapshot) before the next resume.
-          if (record(item)?.kind === "snapshot-required") { shellStream.reload(); return; }
-          if (foldShellEvent(session.shell, item)) remoteShellRevision.update((n) => n + 1);
+          if (event?.kind === "snapshot-required") { shellStream.reload(); return; }
+          const authoritativeSnapshot = event?.kind === "snapshot"
+            && !(Array.isArray(event.resolvedRepositoryIdentityRoots) && (session.shell.projects.length > 0 || session.shell.threads.length > 0));
+          const updatedThreadId = event?.kind === "thread.updated" ? record(event.thread)?.id : undefined;
+          if (session.olderSettledPageDropped) {
+            if (event?.kind === "thread.removed" && typeof event.threadId === "string") {
+              session.olderSettledPageDropped.add(event.threadId);
+            } else if (event?.kind === "thread.updated" && typeof updatedThreadId === "string") {
+              if (event.location === "archive") session.olderSettledPageDropped.add(updatedThreadId);
+              else if (event.location === "active") session.olderSettledPageDropped.delete(updatedThreadId);
+            }
+          }
+          const previousRow = typeof updatedThreadId === "string"
+            ? (session.shell.threads.find((row) => row.id === updatedThreadId)
+              ?? session.shell.olderSettledRows?.find((row) => row.id === updatedThreadId))
+            : undefined;
+          const previousCountKey = olderSettledCountRowKeyFor(session.shell.olderSettled ?? null, previousRow);
+          if (foldShellEvent(session.shell, item)) {
+            if (authoritativeSnapshot) resetSessionOlderSettled(session);
+            else if (event?.kind === "thread.updated") {
+              const updatedThread = record(event.thread) ?? undefined;
+              const nextCountKey = olderSettledCountRowKeyFor(
+                session.shell.olderSettled ?? null,
+                event.location === "active" ? updatedThread : undefined,
+              );
+              const archivedMayBeOlder = event.location === "archive" && previousRow === undefined && Boolean(session.shell.olderSettled)
+                && (typeof updatedThread?.createdAt !== "string" || olderSettledCountRowKeyFor(session.shell.olderSettled ?? null, updatedThread) !== null);
+              if (previousCountKey !== nextCountKey || archivedMayBeOlder) refreshRemoteOlderSettledCounts(session);
+            } else if (event?.kind === "thread.removed") {
+              refreshRemoteOlderSettledCounts(session);
+            }
+            remoteShellRevision.update((n) => n + 1);
+          }
         },
         stopRetrying: (error) => error instanceof RequestFailure && /authoriz/i.test(error.tag ?? ""),
       });
@@ -300,9 +401,61 @@ function backoff(session: Session, error: Error) {
   session.timer = setTimeout(() => void open(session), delay);
 }
 
+function resetSessionOlderSettled(session: Session) {
+  session.olderSettledGeneration += 1;
+  session.olderSettledCountGeneration += 1;
+  if (session.olderSettledCountTimer !== null) clearTimeout(session.olderSettledCountTimer);
+  session.olderSettledCountTimer = null;
+  session.olderSettledFrontier = null;
+  session.olderSettledPageDropped = null;
+  session.olderSettledStatus = "ready";
+  remoteOlderSettledRevision.update((n) => n + 1);
+}
+
+function refreshRemoteOlderSettledCounts(session: Session) {
+  const cut = session.shell.olderSettled ?? null;
+  const client = session.client;
+  if (!cut || !client) return;
+  const sessionGeneration = session.generation;
+  const generation = ++session.olderSettledCountGeneration;
+  if (session.olderSettledCountTimer !== null) clearTimeout(session.olderSettledCountTimer);
+  session.olderSettledCountTimer = setTimeout(() => {
+    session.olderSettledCountTimer = null;
+    if (sessions.get(session.environment.id) !== session || session.generation !== sessionGeneration || session.client !== client) return;
+    void client.request("orchestration.getOlderSettledThreads", { before: { settledAt: cut.before }, limit: 0 }).then((value) => {
+      if (
+        sessions.get(session.environment.id) !== session ||
+        session.generation !== sessionGeneration ||
+        generation !== session.olderSettledCountGeneration ||
+        session.shell.olderSettled?.before !== cut.before
+      ) return;
+      const page = record(value);
+      if (!page || !Array.isArray(page.counts)) return;
+      const next = readOlderSettledCut({
+        before: cut.before,
+        asOfSequence: typeof page.snapshotSequence === "number" ? page.snapshotSequence : cut.asOfSequence,
+        counts: page.counts,
+      });
+      if (next) {
+        session.shell.olderSettled = next;
+        remoteOlderSettledRevision.update((n) => n + 1);
+      }
+    }).catch(() => {});
+  }, 500);
+}
+
 function stop(session: Session) {
   session.generation++;
+  session.olderSettledGeneration++;
+  session.olderSettledCountGeneration++;
   clearTimeout(session.timer);
+  if (session.olderSettledCountTimer !== null) clearTimeout(session.olderSettledCountTimer);
+  session.olderSettledCountTimer = null;
+  session.olderSettledPageDropped = null;
+  if (session.olderSettledStatus === "pending") {
+    session.olderSettledStatus = "ready";
+    remoteOlderSettledRevision.update((n) => n + 1);
+  }
   session.client?.close();
   session.client = null;
 }
@@ -336,6 +489,7 @@ export function syncEnvironments(list: ManagedEnvironment[]) {
       sessions.delete(id);
       setConnection(id, null);
       setAttempt(id, null);
+      remoteOlderSettledRevision.update((n) => n + 1);
       remoteShellRevision.update((n) => n + 1);
     }
   }
@@ -344,11 +498,33 @@ export function syncEnvironments(list: ManagedEnvironment[]) {
     if (existing) {
       const wasEnabled = existing.environment.enabled;
       existing.environment = environment;
-      if (wasEnabled && !environment.enabled) { stop(existing); setConnection(environment.id, { phase: "offline", error: null }); }
-      else if (!wasEnabled && environment.enabled) { existing.ladder.reset(); void open(existing); }
+      if (wasEnabled && !environment.enabled) {
+        stop(existing);
+        setConnection(environment.id, { phase: "offline", error: null });
+        remoteOlderSettledRevision.update((n) => n + 1);
+        remoteShellRevision.update((n) => n + 1);
+      } else if (!wasEnabled && environment.enabled) {
+        existing.ladder.reset();
+        void open(existing);
+      }
       continue;
     }
-    const session: Session = { identity: ++nextSessionIdentity, environment, client: null, shell: { projects: [], threads: [], archived: [], loaded: false }, generation: 0, ladder: new ReconnectLadder(), shellResume: { cursor: null, origin: null }, timer: undefined };
+    const session: Session = {
+      identity: ++nextSessionIdentity,
+      environment,
+      client: null,
+      shell: { projects: [], threads: [], archived: [], loaded: false, olderSettled: null, olderSettledRows: [] },
+      generation: 0,
+      ladder: new ReconnectLadder(),
+      shellResume: { cursor: null, origin: null },
+      timer: undefined,
+      olderSettledStatus: "ready",
+      olderSettledFrontier: null,
+      olderSettledScopeKey: "",
+      olderSettledGeneration: 0,
+      olderSettledCountGeneration: 0,
+      olderSettledCountTimer: null,
+    };
     sessions.set(environment.id, session);
     if (environment.enabled) void open(session);
     else setConnection(environment.id, { phase: "offline", error: null });
@@ -419,12 +595,180 @@ export function scopeShellRecord(environmentId: string, item: Record<string, unk
   return next;
 }
 
+function sessionShellThreads(shell: EnvironmentShell): Record<string, unknown>[] {
+  const older = shell.olderSettledRows;
+  if (!older || older.length === 0) return shell.threads;
+  const present = new Set(shell.threads.map((thread) => thread.id));
+  return [...shell.threads, ...older.filter((thread) => !present.has(thread.id))];
+}
+
+function sessionScopeFor(environmentId: string, projectIds: readonly string[] | undefined): { key: string; localIds: string[] | undefined; targeted: boolean } {
+  if (!projectIds || projectIds.length === 0) return { key: "", localIds: undefined, targeted: true };
+  const localIds: string[] = [];
+  for (const id of projectIds) {
+    const parsed = parseScopedKey(id);
+    if (parsed?.environmentId === environmentId) localIds.push(parsed.localId);
+  }
+  if (localIds.length === 0) return { key: NONE_SCOPE_KEY, localIds: undefined, targeted: false };
+  return { key: [...localIds].sort().join("\n"), localIds, targeted: true };
+}
+
+export function remoteUnloadedOlderSettledCount(projectIds?: ReadonlySet<string>): number {
+  remoteShellRevision();
+  remoteOlderSettledRevision();
+  const filter = projectIds && projectIds.size > 0 ? projectIds : undefined;
+  let byEnv: Map<string, Set<string>> | null = null;
+  if (filter) {
+    byEnv = new Map();
+    for (const id of filter) {
+      const parsed = parseScopedKey(id);
+      if (!parsed) continue;
+      let ids = byEnv.get(parsed.environmentId);
+      if (!ids) { ids = new Set(); byEnv.set(parsed.environmentId, ids); }
+      ids.add(parsed.localId);
+    }
+    if (byEnv.size === 0) return 0;
+  }
+  let total = 0;
+  for (const [id, session] of sessions) {
+    if (!session.environment.enabled || !session.shell.loaded || !session.shell.olderSettled) continue;
+    const localFilter = byEnv ? byEnv.get(id) : undefined;
+    if (byEnv && !localFilter) continue;
+    total += countUnloadedOlderSettled(session.shell.olderSettled, sessionShellThreads(session.shell), localFilter);
+  }
+  return total;
+}
+
+export function remoteOlderSettledProjectCount(environmentId: string, localProjectId: string): number {
+  remoteShellRevision();
+  remoteOlderSettledRevision();
+  const session = sessions.get(environmentId);
+  if (!session || !session.environment.enabled || !session.shell.loaded || !session.shell.olderSettled) return 0;
+  return session.shell.olderSettled.counts.find((entry) => entry.projectId === localProjectId)?.count ?? 0;
+}
+
+export function hasConnectedRemoteOlderSettled(projectIds?: readonly string[]): boolean {
+  remoteShellRevision();
+  remoteOlderSettledRevision();
+  const connections = environmentConnections();
+  for (const [id, session] of sessions) {
+    if (!session.environment.enabled || !session.shell.loaded || !session.shell.olderSettled) continue;
+    if (!session.client || connections[id]?.phase !== "connected") continue;
+    const target = sessionScopeFor(id, projectIds);
+    if (!target.targeted) continue;
+    const localFilter = target.localIds ? new Set(target.localIds) : undefined;
+    if (countUnloadedOlderSettled(session.shell.olderSettled, sessionShellThreads(session.shell), localFilter) > 0) return true;
+  }
+  return false;
+}
+
+export function remoteOlderSettledStatuses(projectIds?: readonly string[]): OlderSettledStatus[] {
+  remoteShellRevision();
+  remoteOlderSettledRevision();
+  const connections = environmentConnections();
+  const statuses: OlderSettledStatus[] = [];
+  for (const [id, session] of sessions) {
+    if (!session.environment.enabled || !session.shell.loaded || !session.shell.olderSettled) continue;
+    if (!session.client || connections[id]?.phase !== "connected") continue;
+    if (projectIds !== undefined) {
+      const target = sessionScopeFor(id, projectIds);
+      if (!target.targeted) continue;
+      statuses.push(target.key === session.olderSettledScopeKey ? session.olderSettledStatus : "ready");
+    } else {
+      if (session.olderSettledScopeKey === NONE_SCOPE_KEY) continue;
+      statuses.push(session.olderSettledStatus);
+    }
+  }
+  return statuses;
+}
+
+export function resetFailedRemoteOlderSettled(projectIds?: readonly string[]) {
+  let changed = false;
+  for (const [id, session] of sessions) {
+    if (!session.environment.enabled || !session.shell.loaded || !session.shell.olderSettled) continue;
+    if (!sessionScopeFor(id, projectIds).targeted) continue;
+    if (session.olderSettledStatus === "failed") {
+      session.olderSettledStatus = "ready";
+      changed = true;
+    }
+  }
+  if (changed) remoteOlderSettledRevision.update((n) => n + 1);
+}
+
+export async function loadRemoteOlderSettledPages(
+  projectIds: readonly string[] | undefined,
+  onError: (error: unknown) => void,
+): Promise<boolean> {
+  let rowsChanged = false;
+  let statusChanged = false;
+  const tasks: Promise<void>[] = [];
+  const connections = environmentConnections();
+  for (const [id, session] of sessions) {
+    if (!session.environment.enabled || !session.shell.loaded) continue;
+    const target = sessionScopeFor(id, projectIds);
+    if (target.key !== session.olderSettledScopeKey) {
+      session.olderSettledScopeKey = target.key;
+      session.olderSettledGeneration += 1;
+      if (session.shell.olderSettledRows?.length) {
+        session.shell.olderSettledRows = [];
+        rowsChanged = true;
+      }
+      session.olderSettledFrontier = null;
+      session.olderSettledStatus = "ready";
+      statusChanged = true;
+    }
+    const cut = session.shell.olderSettled ?? null;
+    const client = session.client;
+    if (!target.targeted || !cut || !client || connections[id]?.phase !== "connected") continue;
+    if (session.olderSettledStatus !== "ready") continue;
+    const generation = session.olderSettledGeneration;
+    const sessionGeneration = session.generation;
+    const dropped = new Set<string>();
+    session.olderSettledPageDropped = dropped;
+    session.olderSettledStatus = "pending";
+    statusChanged = true;
+    tasks.push((async () => {
+      try {
+        const page = record(await client.request("orchestration.getOlderSettledThreads", {
+          before: session.olderSettledFrontier ?? { settledAt: cut.before },
+          ...(target.localIds ? { projectIds: [...target.localIds] } : {}),
+          limit: OLDER_SETTLED_PAGE_SIZE,
+        }));
+        if (sessions.get(id) !== session || session.generation !== sessionGeneration || generation !== session.olderSettledGeneration) return;
+        const threads = Array.isArray(page?.threads) ? page.threads.map(record).filter((item): item is Record<string, unknown> => item !== null) : [];
+        const existing = session.shell.olderSettledRows ?? [];
+        const added = threads.filter((thread) => !dropped.has(String(thread.id)) && !existing.some((row) => row.id === thread.id));
+        if (added.length > 0) {
+          session.shell.olderSettledRows = [...existing, ...added];
+          rowsChanged = true;
+        }
+        const last = threads[threads.length - 1];
+        if (threads.length < OLDER_SETTLED_PAGE_SIZE || typeof last?.settledAt !== "string") session.olderSettledStatus = "done";
+        else { session.olderSettledFrontier = { settledAt: last.settledAt, threadId: String(last.id) }; session.olderSettledStatus = "ready"; }
+        remoteOlderSettledRevision.update((n) => n + 1);
+        if (added.length > 0) remoteShellRevision.update((n) => n + 1);
+      } catch (error) {
+        if (sessions.get(id) !== session || session.generation !== sessionGeneration || generation !== session.olderSettledGeneration) return;
+        session.olderSettledStatus = "failed";
+        remoteOlderSettledRevision.update((n) => n + 1);
+        onError(error);
+      } finally {
+        if (session.olderSettledPageDropped === dropped) session.olderSettledPageDropped = null;
+      }
+    })());
+  }
+  if (statusChanged) remoteOlderSettledRevision.update((n) => n + 1);
+  if (rowsChanged) remoteShellRevision.update((n) => n + 1);
+  if (tasks.length > 0) await Promise.all(tasks);
+  return rowsChanged;
+}
+
 /** `primary` followed by every connected remote environment's records, scoped. The same array when there are none. */
 export function withRemoteShells(primary: Record<string, unknown>[], part: "projects" | "threads" | "archived"): Record<string, unknown>[] {
   let merged: Record<string, unknown>[] | null = null;
   for (const [id, session] of sessions) {
     if (!session.environment.enabled || !session.shell.loaded) continue;
-    const items = session.shell[part];
+    const items = part === "threads" ? sessionShellThreads(session.shell) : session.shell[part];
     if (items.length === 0) continue;
     merged ??= [...primary];
     for (const item of items) merged.push(scopeShellRecord(id, item));
@@ -436,7 +780,11 @@ export function withRemoteShells(primary: Record<string, unknown>[], part: "proj
 export function remoteShellThread(key: string): Record<string, unknown> | null {
   const parsed = parseScopedKey(key);
   if (!parsed) return null;
-  return sessions.get(parsed.environmentId)?.shell.threads.find((item) => item.id === parsed.localId) ?? null;
+  const shell = sessions.get(parsed.environmentId)?.shell;
+  if (!shell) return null;
+  return shell.threads.find((item) => item.id === parsed.localId)
+    ?? shell.olderSettledRows?.find((item) => item.id === parsed.localId)
+    ?? null;
 }
 
 const ID_KEY = /(^id$|Id$)/;
@@ -501,4 +849,5 @@ export function resetEnvironmentsForTest() {
   environmentUsageSources.set({});
   environmentDescriptors.set({});
   remoteShellRevision.set(0);
+  remoteOlderSettledRevision.set(0);
 }

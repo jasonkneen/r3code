@@ -53,6 +53,9 @@ Notes that save time:
 - `nsh test` takes one path per invocation; it does not accept multiple files.
 - For visual changes, compare the running builds at the same size, theme,
   settings and data. Never describe a source test as visual acceptance.
+- After building a platform executable (`.app` or `.exe`), test the built
+  binary interactively on the target OS before sign-off; when no target host is
+  available, say plainly that live executable testing was not run.
 
 ## Building a development bundle
 
@@ -72,6 +75,8 @@ separately, run `python3 tools/prepare_nsh_host.py <checkout>` and pass
 ## Working agreements
 
 - Prefer small, reviewable changes; one behaviour change per commit.
+- Split fixes strictly into general (cross-platform) fixes and Windows-only
+  fixes, using separate commits, branches and PRs rather than mixing them.
 - Read the code you are changing before editing, and verify a claim by running
   the command rather than inferring it.
 - Keep comments that explain *why*; do not leave stale references to documents

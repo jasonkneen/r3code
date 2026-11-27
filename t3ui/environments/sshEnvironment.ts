@@ -7,6 +7,8 @@
 // The port keeps one fixed local port per saved SSH environment, so its address and saved session stay the same across
 // launches; a reconnect re-runs the launch (which reuses a running server) and re-opens the tunnel on that port.
 import { readFile } from "fs/promises";
+import { homedir } from "os";
+import { join } from "path";
 import process from "process";
 import { askpassAvailable } from "../desktop/sshPasswordPrompts";
 import {
@@ -121,8 +123,13 @@ export async function disconnectSshEnvironment(target: SshTarget, deps: SshEnvir
 
 /** discoverSshHosts: ~/.ssh/config aliases and known_hosts entries. */
 export async function discoverSshHosts(read: (path: string) => Promise<string> = (path) => readFile(path, "utf8")): Promise<DiscoveredSshHost[]> {
-  const home = process.env.HOME ?? "";
-  const [config, known] = await Promise.all([read(`${home}/.ssh/config`).catch(() => ""), read(`${home}/.ssh/known_hosts`).catch(() => "")]);
+  let home = "";
+  try { home = homedir(); } catch { home = process.env.HOME ?? process.env.USERPROFILE ?? ""; }
+  if (!home) return [];
+  const [config, known] = await Promise.all([
+    read(join(home, ".ssh", "config")).catch(() => ""),
+    read(join(home, ".ssh", "known_hosts")).catch(() => ""),
+  ]);
   return parseSshHosts(config, known);
 }
 

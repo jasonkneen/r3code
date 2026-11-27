@@ -2,7 +2,7 @@
 // through the command registry, so the menu, the palette and a keybinding all reach the same code. They are not DEFAULT_KEYBINDINGS
 // commands; their chords belong to the menu (and, for the app zoom, to the keystroke fallbacks below).
 import { keymap } from "nsh";
-import { Window } from "nsh/desktop";
+import { closeMainWindow } from "../desktop/windowControl";
 import { backendUrl, configureBackend } from "../store";
 import { zoomApp, type ZoomDirection } from "../shell/appZoom";
 import { zoomHoveredSurface } from "../shell/surfaceZoom";
@@ -49,7 +49,7 @@ export function installAppCommands() {
     // Check-only: queries GitHub's releases API (desktop/updateCheck.ts) and always shows a result, including
     // offline/rate-limit errors. No download/install — this build is ad-hoc signed and not notarized.
     [APP_COMMAND.checkForUpdates]: () => { void showUpdateCheckToast(); },
-    [APP_COMMAND.closeWindow]: () => { Window.close(); },
+    [APP_COMMAND.closeWindow]: () => { closeMainWindow(); },
     // composer.pasteAsText is registered by the open composer (shellCommands bindComposerPasteAsText); false lets a native paste stand.
     [APP_COMMAND.pasteAsText]: () => (runCommand("composer.pasteAsText") ? undefined : false),
     [APP_COMMAND.reload]: reload,

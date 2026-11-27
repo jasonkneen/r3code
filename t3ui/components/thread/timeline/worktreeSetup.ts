@@ -1,7 +1,7 @@
 // Worktree setup progress (packages/contracts worktreeSetup.ts WorktreeSetupSnapshot, client-runtime worktreeSetup.ts,
 // ChatView.logic resolveVisibleWorktreeSetup, MessagesTimeline.logic.ts placement of the `worktree-setup` row).
 // The snapshot streams from `subscribeWorktreeSetup` ({ threadId }); `worktreeSetup.cancel` stops it.
-import { effect, signal } from "nsh";
+import { computed, effect, signal } from "nsh";
 import { backendConnected, subscribeBackend } from "../../../store";
 import type { TimelineRow } from "./workLog";
 
@@ -108,11 +108,16 @@ export function placeWorktreeSetup(rows: TimelineRow[], snapshot: WorktreeSetupS
 /** useWorktreeSetup's subscription: the latest snapshot for `threadId` while `active` holds (never an older sequence). */
 export function useWorktreeSetupSnapshot(threadId: () => string | null, active: () => boolean, subscribe: typeof subscribeBackend = subscribeBackend) {
   const snapshot = signal<WorktreeSetupSnapshot | null>(null);
+  const currentThreadId = computed(() => threadId());
+  const subscribedThreadId = computed(() => (active() ? currentThreadId() : null));
   let shownFor: string | null = null;
   effect(() => {
-    const id = threadId();
+    const id = currentThreadId();
     if (id !== shownFor) { shownFor = id; snapshot.set(null); }
-    if (!id || !active()) return;
+  });
+  effect(() => {
+    const id = subscribedThreadId();
+    if (!id) return;
     backendConnected(); // a reconnect closes the stream: subscribe again (the web's subscription atoms do)
     return subscribe("subscribeWorktreeSetup", { threadId: id }, (value) => {
       const next = readWorktreeSetupSnapshot(value);

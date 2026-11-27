@@ -4,7 +4,8 @@
 // `pressQuitShortcut` once per activation, a held key's auto-repeats arrive as quick successive activations, so a gap
 // under REPEAT_GAP_MS is a repeat of the key still being held and a longer one is a new press.
 import { host, platform, signal } from "nsh";
-import { Menu, Window } from "nsh/desktop";
+import { Menu } from "nsh/desktop";
+import { closeMainWindow } from "../desktop/windowControl";
 import { settingValue } from "../store";
 import { toggleSettings } from "../commands/standardCommands";
 import { installAppCommands } from "../commands/appCommands";
@@ -85,9 +86,9 @@ export function savedQuitMode(): QuitMode {
 }
 
 // SSH tunnels (environments/ssh.ts) end before the window closes, so no ssh child outlives the app.
-let quitAction = () => { stopAllSshTunnels(); Window.close(); };
+let quitAction = () => { stopAllSshTunnels(); closeMainWindow(); };
 /** Tests replace what quitting does. */
-export function setQuitAction(next: (() => void) | null) { quitAction = next ?? (() => { stopAllSshTunnels(); Window.close(); }); }
+export function setQuitAction(next: (() => void) | null) { quitAction = next ?? (() => { stopAllSshTunnels(); closeMainWindow(); }); }
 const live = createQuitController({ mode: savedQuitMode, quit: () => quitAction() });
 
 export const quitHint = () => live.hint();
@@ -112,6 +113,7 @@ export function installApplicationMenu() {
   const install = (hostRoles?: ReadonlySet<string>) => {
     try {
       Menu.setApplicationMenu(buildApplicationMenu({ os: platform.os, run: (id) => { runCommand(id); }, openSettings: toggleSettings, quit: pressQuitShortcut, ...(hostRoles ? { hostRoles } : {}) }));
+      if (platform.os !== "macos") (Menu as { setMenuBar?: (mode: "shown" | "autoHide") => void }).setMenuBar?.("autoHide");
     } catch {
       // A platform without an application menu has no ⌘Q to confirm either.
     }

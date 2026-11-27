@@ -267,7 +267,7 @@ export function MessageRow(props: {
               tooltip={props.forkBusy?.() ? "Forking response..." : props.forkEnabled?.() ? "Fork from this response" : "Connect the environment to fork this response"}
               role="button"
             >
-              <MotionLoop spec={tailwindPulse} active={() => props.forkBusy?.() === true}><Icon name="git-branch" size={13} /></MotionLoop>
+              {props.forkBusy?.() ? <MotionLoop spec={tailwindPulse}><Icon name="git-branch" size={13} /></MotionLoop> : <Icon name="git-branch" size={13} />}
             </View> : null}
           </View>
           {!isUser() && !props.message().streaming && stamp() ? <Text class="text-xs tabular-nums text-muted-foreground" tooltip={stampTooltip()}>{stamp()}</Text> : null}

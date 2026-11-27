@@ -72,3 +72,43 @@ test("caret offsets map through list markers and quote prefixes", () => {
   expect(posToOffset(doc, 10)).toBe("- ab\n> ".length);
   expect(offsetToPos(doc, "- a".length)).toBe(4);
 });
+
+test("orderedList items with default or missing marker attrs keep ordered markers", () => {
+  const doc: RichNodeJSON = {
+    type: "doc",
+    content: [
+      {
+        type: "orderedList",
+        attrs: { start: 1 },
+        content: [
+          { type: "listItem", attrs: { indent: "", marker: "1.", space: " " }, content: [{ type: "paragraph", content: [{ type: "text", text: "first" }] }] },
+          { type: "listItem", attrs: { indent: "", marker: "-", space: " " }, content: [{ type: "paragraph" }] },
+        ],
+      },
+    ],
+  };
+  expect(docToPrompt(doc)).toBe("1. first\n2. ");
+  expect(promptToDoc(docToPrompt(doc), rich).content?.map((node) => node.type)).toEqual(["orderedList"]);
+
+  const parenDoc: RichNodeJSON = {
+    type: "doc",
+    content: [
+      {
+        type: "orderedList",
+        attrs: { start: 3 },
+        content: [
+          { type: "listItem", attrs: { indent: "", marker: "3)", space: " " }, content: [{ type: "paragraph", content: [{ type: "text", text: "third" }] }] },
+          { type: "listItem", content: [{ type: "paragraph", content: [{ type: "text", text: "fourth" }] }] },
+        ],
+      },
+    ],
+  };
+  expect(docToPrompt(parenDoc)).toBe("3) third\n4) fourth");
+
+  const zeroDoc = promptToDoc("0) zero", rich);
+  zeroDoc.content![0]!.content!.push({ type: "listItem", attrs: { indent: "", marker: "-", space: " " }, content: [{ type: "paragraph", content: [{ type: "text", text: "one" }] }] });
+  expect(docToPrompt(zeroDoc)).toBe("0) zero\n1) one");
+
+  const afterGapDoc = promptToDoc("1. x\n\nafter", rich);
+  expect(offsetToPos(afterGapDoc, "1. x".length)).toBe(4);
+});

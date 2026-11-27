@@ -126,3 +126,50 @@ test("a bounded refresh retains loaded earlier turns and the history frontier", 
   expect(threadHistoryFor(id).hasMore).toBe(false);
   setThreadHistoryFetchForTests(null);
 });
+
+test("an evicted thread's stale history response resolving last cannot overwrite a reopened load", async () => {
+  const id = "thread:evicted-history";
+  const others = Array.from({ length: 9 }, (_, index) => `thread:evict-other-${index}`);
+  const threadRow = (threadId: string) => ({
+    id: threadId, projectId: "project-1", title: threadId, creationSource: "web", providerInstanceId: "codex",
+    modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" }, providerInstanceHistory: ["codex"], status: "completed",
+    latestRunId: null, pendingBackgroundTasks: [], pinnedAt: null, settledOverride: null, snoozedUntil: null, createdAt: at(0), updatedAt: at(0),
+  });
+  setRequestBackendForTest(() => Promise.resolve({}));
+  setBackendStatusForTest("connected");
+  applyShellEventForTest({ kind: "snapshot", snapshot: {
+    projects: [{ id: "project-1", title: "legion", workspaceRoot: "/work/legion", createdAt: at(0), updatedAt: at(0) }],
+    threads: [threadRow(id), ...others.map(threadRow)],
+  } });
+  openThreadById(id);
+  markThreadSubscribingForTest(id);
+  applyThreadEventForTest(id, { kind: "snapshot", snapshotSequence: 5, historyCursor: "c1", hasMoreHistory: true, projection: {
+    messages: [], turnItems: [userItem("u3", 30, "third")], runs: [], checkpoints: [], subagents: [], runtimeRequests: [],
+  } });
+  const replies: Array<(response: Response) => void> = [];
+  setThreadHistoryFetchForTests((() => new Promise<Response>((resolve) => { replies.push(resolve); })) as typeof fetch, { url: "ws://127.0.0.1:9/", bearer: "tok" });
+  const old = loadEarlierThreadHistory(id);
+  while (replies.length < 1) await Promise.resolve();
+  for (const other of others) {
+    openThreadById(other);
+    markThreadSubscribingForTest(other);
+    applyThreadEventForTest(other, { kind: "snapshot", snapshotSequence: 1, projection: {
+      messages: [], turnItems: [userItem(`u-${other}`, 10, other)], runs: [], checkpoints: [], subagents: [], runtimeRequests: [],
+    } });
+  }
+  expect(threadHistoryFor(id)).toEqual({ cursor: null, hasMore: false, loading: false, error: null });
+  openThreadById(id);
+  markThreadSubscribingForTest(id);
+  applyThreadEventForTest(id, { kind: "snapshot", snapshotSequence: 6, historyCursor: "reopened", hasMoreHistory: true, projection: {
+    messages: [], turnItems: [userItem("u-reopened", 40, "reopened latest")], runs: [], checkpoints: [], subagents: [], runtimeRequests: [],
+  } });
+  const latest = loadEarlierThreadHistory(id);
+  while (replies.length < 2) await Promise.resolve();
+  replies[1]!({ ok: true, json: () => Promise.resolve({ items: [{ item: userItem("u-new", 20, "reopened page") }], nextCursor: null, hasMoreHistory: false }) } as Response);
+  expect(await latest).toBe("loaded");
+  replies[0]!({ ok: true, json: () => Promise.resolve({ items: [{ item: userItem("u-stale", 1, "stale evicted page") }], nextCursor: "stale-next", hasMoreHistory: true }) } as Response);
+  expect(await old).toBe("noop");
+  expect(threadHistoryFor(id)).toEqual({ cursor: null, hasMore: false, loading: false, error: null });
+  expect(threadMessages().map((message) => message.body)).toEqual(["reopened page", "reopened latest"]);
+  setThreadHistoryFetchForTests(null);
+});

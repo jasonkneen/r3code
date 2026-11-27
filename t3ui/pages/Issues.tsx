@@ -2,6 +2,7 @@
 // filter toolbar + saved views + search + sort, failed-only retry (#39536), and resizable right detail pane
 // holding the selected issue or a linked pull request.
 import { cleanup, computed, effect, openUrl, Overlay, Scroll, signal, Storage, Text, untracked, View } from "nsh";
+import { titleBar } from "nsh/desktop";
 import {
   allProjects, allThreads, backendStatus, closeUtility, openSettings, openThreadById, requestBackend, sidebarOpen, toggleSidebar,
 } from "../store";
@@ -203,7 +204,7 @@ export function Issues(props: { deps?: IssuesPageDeps } = {}) {
       ) : null}
 
       <View class="min-w-0 flex-1 flex-col">
-        <View class="shrink-0 flex-col gap-3 border-b border-border px-6 py-4">
+        <View class="shrink-0 flex-col gap-3 border-b border-border py-4" style={{ paddingLeft: sidebarOpen() ? 24 : titleBar().left + 24, paddingRight: (detailOpen() ? 0 : titleBar().right) + 24 }} desktop={{ windowDrag: true }}>
           <View class="flex-row items-center justify-between gap-3">
             <View class="min-w-0 flex-row items-center gap-2">
               {!sidebarOpen() ? (

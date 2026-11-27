@@ -22,9 +22,10 @@ import { homedir } from "os";
 import { settingValue } from "../../store";
 import { showToast } from "../../components/toast/toastState";
 import { THEME_CARDS, type ThemeAppearance } from "../../themePreviews";
-import { builtContrast, builtThemeForMode, DEFAULT_CONTRAST, MAX_CONTRAST, MIN_CONTRAST, setBuiltTheme } from "./builtTheme";
+import { builtContrast, builtThemeForMode, DEFAULT_CONTRAST, MAX_CONTRAST, MIN_CONTRAST, setBuiltTheme, themeRebuildAvailable } from "./builtTheme";
 import { customThemeById, customThemes, type CustomTheme } from "./customThemes";
 import { environmentThemeById, environmentThemes } from "./environmentThemes";
+import { generateLiveTheme } from "./liveThemeGenerator";
 
 export const REQUEST_FIELDS = { light: "themeLight", dark: "themeDark", contrast: "appearanceContrast" } as const;
 
@@ -66,6 +67,8 @@ export interface ThemeSyncOptions {
   isLiveCapable?: () => boolean;
   /** Calls the host (`host.call`, overridable for the same reason): defaults to it exactly. */
   callHost?: (name: string, data: unknown) => Promise<unknown>;
+  /** Generates the theme JSON in-process and applies it directly via `theme.setOverrides` (for hosts without a launcher theme supervisor, e.g. Windows). */
+  directLive?: boolean;
 }
 
 /** The folder the launcher put this window's bootstrap file in (a test copy has its own), else the main one. */
@@ -228,7 +231,8 @@ function watch(requestId: string, deadline: number) {
  * the rebuild path by omitting it, as `ThemeSync.test.tsx`'s fixture does). */
 function liveCapable(): boolean {
   const current = config;
-  if (!current || !current.io.writeLiveRequest || !current.io.readLiveStatus || !current.io.readLiveResult) return false;
+  if (!current) return false;
+  if (!current.directLive && (!current.io.writeLiveRequest || !current.io.readLiveStatus || !current.io.readLiveResult)) return false;
   try {
     return current.isLiveCapable();
   } catch {
@@ -299,11 +303,32 @@ function send() {
   // Persists the choice for the next launch's themed first build, live apply or rebuild alike
   // (LauncherThemes.start() reads it before the rebuild loop's own request file, so it is never
   // what triggers a rebuild). Best-effort: a failure here never fails the request itself.
-  if (!preview && current.io.writeLast) {
+  if (!preview && !current.directLive && current.io.writeLast) {
     // Atomic writes use the same temporary filename, so concurrent writes can
     // otherwise collide or leave an older selection as the next launch theme.
     const writeLast = current.io.writeLast;
     lastWriteQueue = lastWriteQueue.catch(() => {}).then(() => writeLast(body)).catch(() => {});
+  }
+  if (current.directLive && liveCapable()) {
+    const customs = usedCustoms(desired, preview);
+    const apply = hostApplyQueue.catch(() => {}).then(async () => {
+      if (config !== current || inFlight !== requestId) return false;
+      const theme = generateLiveTheme(desired, customs);
+      await current.callHost("theme.setOverrides", theme);
+      return true;
+    });
+    hostApplyQueue = apply.then(() => {}, () => {});
+    void apply.then(
+      (applied) => {
+        if (!applied || inFlight !== requestId) return;
+        if (previewRequest !== requestId) setBuiltTheme(desired);
+        finish();
+      },
+      (error: unknown) => {
+        if (inFlight === requestId) fail(error instanceof Error ? error.message : "The theme could not be applied live.");
+      },
+    );
+    return;
   }
   if (liveCapable()) {
     const write = liveWriteQueue.catch(() => {}).then(async () => {
@@ -352,6 +377,7 @@ export function installThemeSync(options: ThemeSyncOptions = {}) {
     timeoutMs: options.timeoutMs ?? 180_000,
     isLiveCapable: options.isLiveCapable ?? (() => host.available()),
     callHost: options.callHost ?? ((name, data) => host.call(name, data)),
+    directLive: options.directLive ?? (options.io === undefined && !themeRebuildAvailable()),
   };
   inFlight = null;
   applying.set(false);

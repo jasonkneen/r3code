@@ -1,7 +1,7 @@
 // Which theme and colour scheme the user picked: the state behind the Appearance
 // panel, the palette's theme rows and the preview tiles. Light and dark each carry
 // their own theme id (a built-in card or a custom theme from customThemes.ts).
-import { setColorScheme } from "nsh";
+import { host, setColorScheme } from "nsh";
 import { settingValue, updateSetting } from "../../store";
 import { THEME_CARDS, type ThemeAppearance, type ThemeCard, type ThemePreviewColors } from "../../themePreviews";
 import { BUILT_THEME_ID, builtThemeForMode, themeRebuildAvailable } from "./builtTheme";
@@ -78,8 +78,10 @@ export function previewFor(card: ThemeCard, mode: ThemeAppearance): ThemePreview
   return (card.previews.find((p) => p.mode === mode) ?? card.previews[0]!).colors;
 }
 
-// Started by the launcher with a theme-aware build: answer picks and contrast changes with a rebuild request.
-if (themeRebuildAvailable()) installThemeSync();
+// Started by the launcher with a theme-aware build, or on a host providing live theme.setOverrides (e.g. Windows).
+let hostLiveThemes = false;
+try { hostLiveThemes = host.available(); } catch { hostLiveThemes = false; }
+if (themeRebuildAvailable() || hostLiveThemes) installThemeSync();
 
 // useDefaultTheme.ts startDefaultThemeAdoption: the connected environment's default theme (`defaultTheme`,
 // `defaultThemeSetAt`) is applied once per generation; a theme that resolves late (published after the setting) still applies.

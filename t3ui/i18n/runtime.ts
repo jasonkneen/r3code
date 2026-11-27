@@ -1,4 +1,4 @@
-import { effect } from "nsh";
+import { effect, host, platform } from "nsh";
 import { settingValue } from "../store";
 import { DEFAULT_LOCALE, SUPPORTED_LOCALES, resolveLocaleSelection } from "./locales";
 import { getActiveLocale, getFormattingLocale, registerLocaleCatalog, setActiveLocale } from "./messages";
@@ -12,6 +12,16 @@ let requestedFormattingLocale = DEFAULT_LOCALE;
 let started = false;
 
 async function importLocaleJson(locale: string): Promise<Readonly<Record<string, string>> | null> {
+  if (platform.os === "windows" && host.available()) {
+    try {
+      const external = await host.call("r3.readLocale", { locale }, { timeout: 5000 });
+      if (external && typeof external === "object" && !Array.isArray(external)) {
+        return external as Readonly<Record<string, string>>;
+      }
+    } catch {
+      /* fall through to bundled import */
+    }
+  }
   try {
     switch (locale) {
       case "de": return (await import("./translations/de.json")).default;

@@ -1,6 +1,7 @@
 // The Pull requests page, ported from components/pullRequest/PullRequestsPage.tsx and
 // PullRequestsColumn.tsx. List state lives in pullRequestListModel; this file lays it out.
 import { colorScheme, effect, openUrl, Scroll, signal, Storage, Text, untracked, View, windowSize } from "nsh";
+import { titleBar } from "nsh/desktop";
 import { pullRequestPanelWidth } from "../components/rightPanel/panelLogic";
 import { createLiveResize } from "../components/rightPanel/liveResize";
 import { createPullRequestPanelWidth } from "../components/pullRequest/pullRequestPanelWidth";
@@ -19,7 +20,7 @@ import { PullRequestListEmptyState, PullRequestsUnavailableState } from "../comp
 import { PullRequestListGroups } from "../components/pullRequest/PullRequestListGroups";
 import { createPullRequestListModel } from "../components/pullRequest/pullRequestListModel";
 import { consumePendingGuideOpen, guideRunKey, pendingGuideOpen, setShownGuide } from "../components/pullRequest/guide/guideRunCoordinator";
-import { allProjects, backendBearer, backendError, backendUrl, backendStatus, createThread, openAddProjectPalette, openSettings, openThread, openThreadById, requestBackend, requestBackendUnrouted, setComposerDraft, setWorkspaceStrategy, subscribeBackend, supportsPullRequestChecks } from "../store";
+import { allProjects, backendBearer, backendError, backendUrl, backendStatus, createThread, openAddProjectPalette, openSettings, openThread, openThreadById, requestBackend, requestBackendUnrouted, setComposerDraft, setWorkspaceStrategy, sidebarOpen, subscribeBackend, supportsPullRequestChecks } from "../store";
 import { invalidatePullRequests, usePullRequestRefreshes, type Subscribe } from "../components/pullRequest/pullRequestState";
 import { PRIMARY_ROUTING_ENVIRONMENT } from "../components/pullRequest/pullRequestRoutingInstall";
 import { showToast, updateToast } from "../components/toast";
@@ -255,7 +256,7 @@ export function PullRequestsPage(deps: PullRequestsDeps) {
         {/* WorkspacePageHeader: 52pt, gutters 1.25rem, no rule; the breadcrumb is `text-sm font-medium` with a `Pull requests` h1. */}
         {/* PullRequestsColumn: once the in-flow filters scroll out of view (its IntersectionObserver on the marker under
             them), the header condenses into the "Pull request scope" breadcrumb with compact filters, search and Refresh. */}
-        <View class="h-[52px] min-h-[52px] shrink-0 flex-row items-center gap-3 bg-background px-5">
+        <View class="h-[52px] min-h-[52px] shrink-0 flex-row items-center gap-3 bg-background" style={{ paddingLeft: sidebarOpen() ? 20 : titleBar().left + 20, paddingRight: (selected() ? 0 : titleBar().right) + 20 }} desktop={{ windowDrag: true }}>
           {condensed() ? <PullRequestCondensedTopbar model={model} refreshing={refreshing} onRefresh={() => void refreshFromHost()} /> : (
             <View class="min-w-0 flex-row items-center" role="navigation" accessibilityLabel="Pull requests breadcrumb">
               <Text class="min-w-0 truncate text-sm font-medium text-foreground">Pull requests</Text>
@@ -341,7 +342,7 @@ export function PullRequestsPage(deps: PullRequestsDeps) {
       {selected() ? (
           <View class={detailMaximized() ? "relative min-w-0 flex-1 flex-col border-l border-border" : "relative min-w-0 shrink-0 flex-col border-l border-border"} style={detailMaximized() ? undefined : { width: resize.live() ?? clampDetailWidth(panelWidth.saved() ?? initialDetailWidth) }}>
             {!detailMaximized() ? <View role="button" accessibilityLabel="Resize pull request panel" focusable={false} class="absolute inset-y-0 left-0 z-20 w-2" {...resize.handle}>{resize.overlay()}</View> : null}
-            <View class="h-[52px] min-h-[52px] shrink-0 flex-row items-center gap-1 px-3" accessibilityLabel="Pull request tabs">
+            <View class="h-[52px] min-h-[52px] shrink-0 flex-row items-center gap-1 pl-3" style={{ paddingRight: titleBar().right + 12 }} desktop={{ windowDrag: true }} accessibilityLabel="Pull request tabs">
               <View class="min-w-0 flex-1 flex-row items-center gap-1">
                 <Each of={openTabs()} key={(entry: PullRequestEntry) => entryKey(entry)}>
                   {(entry) => <View role="button" accessibilityLabel={`Open pull request ${entry().number}`} onPress={() => selected.set(entry())} class={selected() && entryKey(selected()!) === entryKey(entry()) ? "h-7 flex-row items-center gap-1 rounded-md bg-accent-50 px-2" : "h-7 flex-row items-center gap-1 rounded-md px-2 hover:bg-accent-50"}>

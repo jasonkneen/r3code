@@ -4,9 +4,14 @@
 // keyboard-interactive login is tried again without batch mode when the launcher set up the askpass helper
 // (desktop/sshPasswordPrompts.ts), and its prompts go to the SSH verification dialog. Without the helper such hosts
 // get SSH_KEY_ONLY_MESSAGE. Nothing here logs or stores a credential.
+import process from "process";
 import { askpassAvailable, sshPasswordPrompts, watchSshPrompts } from "../desktop/sshPasswordPrompts";
 
-export const SSH_COMMAND = "/usr/bin/ssh";
+export function defaultSshCommand(os: string = process.platform): string {
+  return os === "windows" ? "ssh.exe" : "/usr/bin/ssh";
+}
+
+export const SSH_COMMAND = defaultSshCommand();
 export const SSH_KEY_ONLY_MESSAGE = "This host asks for a password. This build supports SSH key or agent login only: add a key to ssh-agent or ~/.ssh/config and try again.";
 
 export interface SshTarget { alias: string; hostname: string; username: string | null; port: number | null }

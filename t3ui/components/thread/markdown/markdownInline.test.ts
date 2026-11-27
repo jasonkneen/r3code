@@ -2,7 +2,7 @@ import { expect, test } from "nsh/test";
 import { TextView } from "nsh/base";
 import type { TextViewBlock, TextViewInline } from "nsh/base";
 import { assistantCitationLabel, parseAssistantCitationHref, serializeAssistantCitation, type AssistantCitation } from "./assistantCitations";
-import { labelFileChips, matchInlineSkills, transformMarkdownBlocks, WEB_CHIP_MAX_LABEL, type FileChipData, type InlineContext } from "./markdownInline";
+import { labelFileChips, matchInlineSkills, tableCellLabelMaxWidth, transformMarkdownBlocks, WEB_CHIP_MAX_LABEL, type FileChipData, type InlineContext, type ThreadChipData } from "./markdownInline";
 import type { MarkdownFileLinkMeta } from "./fileLinkMeta";
 
 const CONTEXT: InlineContext = { cwd: "/Users/dev/app", skills: [{ name: "review", displayName: "Code Review" }, { name: "deploy", displayName: null }], webLinkChips: true };
@@ -89,4 +89,21 @@ test("model:<instance>/<model> becomes a chip only for a model the resolver know
   const chips = customs(content).filter((node) => node.name === "model");
   expect(chips.length).toBe(1);
   expect((chips[0] as { data: { source: string } }).data.source).toBe("model:codex/gpt-6.1-sol");
+});
+
+test("table cell chips carry column bounds so wide tables cap labels inside their column", () => {
+  const markdown = [
+    "| Role Thread | Platform | Sent (CST) | Receipt | Next |",
+    "| --- | --- | --- | --- | --- |",
+    "| [China Telecom Data Development Center](t3-thread://v1/thread-1) | BOSS | `2026-11-26 19:28:12` | `ok` | `2026-11-27` |",
+  ].join("\n");
+  const document = TextView.parse(markdown, { math: false }, null);
+  const blocks = transformMarkdownBlocks(document.blocks, CONTEXT);
+  const table = blocks[0] as Extract<TextViewBlock, { type: "table" }>;
+  const chip = customs(table.rows![0]![0]!.content)[0]!.data as ThreadChipData;
+  expect(chip.tableColumn).toBeDefined();
+  const capped = tableCellLabelMaxWidth(chip.tableColumn!, 640);
+  expect(capped).toBeGreaterThanOrEqual(64);
+  expect(capped).toBeLessThan(chip.tableColumn!.minPx);
+  expect(capped).toBeLessThan(288);
 });

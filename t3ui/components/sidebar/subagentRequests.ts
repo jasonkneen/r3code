@@ -10,8 +10,9 @@ const childLive = (thread: Thread) => {
   return meta.activityRunStatus !== null ? true : LIVE.has(meta.runStatus);
 };
 
-/** Subagents and side chats live inside their parent's view, never in thread lists (isListedThreadLineage). */
+/** Subagents, side chats and cross-environment delegated children live inside their parent's view, never in thread lists (isListedThreadLineage). */
 export const isListedThread = (thread: Thread): boolean => {
+  if (thread.relations?.delegatedFrom) return false;
   const lineage = thread.relations?.lineage;
   return !(lineage && (lineage.relationshipToParent === "subagent" || lineage.sideChat));
 };

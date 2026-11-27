@@ -1,0 +1,1563 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index a8f51ce..d51f291 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -198,6 +198,7 @@ windows = { version = "0.62", features = [
+   "Win32_Graphics_Gdi",
+   "Win32_Graphics_Imaging",
+   "Win32_Graphics_Imaging_D2D",
++  "Win32_Security_Cryptography",
+   "Win32_Storage_Xps",
+   "Win32_System_Com",
+   "Win32_System_Com_StructuredStorage",
+diff --git a/crates/nsh-base/src/lib.rs b/crates/nsh-base/src/lib.rs
+index d135971..c392aef 100644
+--- a/crates/nsh-base/src/lib.rs
++++ b/crates/nsh-base/src/lib.rs
+@@ -110,6 +110,8 @@ use std::sync::Arc;
+ use nsh_core::element::{ComponentSpec, Registry};
+ /// `Input`, the native text input (UITextField / UITextView, EditText):
+ /// TSX's `Input` of `nsh/base`, a host element the core makes.
++pub use crate::syntax::r3_highlight_lines;
++pub use crate::text_view::r3_tex_to_svg;
+ pub use nsh_core::element::{Input, input};
+ 
+ #[cfg(feature = "emoji-picker")]
+diff --git a/crates/nsh-base/src/syntax.rs b/crates/nsh-base/src/syntax.rs
+index 13d08e1..7de73ea 100644
+--- a/crates/nsh-base/src/syntax.rs
++++ b/crates/nsh-base/src/syntax.rs
+@@ -372,3 +372,87 @@ pub(crate) fn warn_no_highlight() {
+         )
+     });
+ }
++
++#[cfg(feature = "highlight")]
++fn r3_token_colors(token: Option<Token>) -> (Option<&'static str>, Option<&'static str>, u8) {
++    match token {
++        Some(Token::Comment) => (Some("#6e7781"), Some("#7d7a72"), 1),
++        Some(Token::Keyword) => (Some("#8250df"), Some("#c4a7ff"), 0),
++        Some(Token::String) => (Some("#116329"), Some("#9fd68a"), 0),
++        Some(Token::Number) => (Some("#953800"), Some("#f5b27a"), 0),
++        Some(Token::Title) => (Some("#0550ae"), Some("#82b8ff"), 0),
++        Some(Token::Attr) => (Some("#7d4e00"), Some("#f0c674"), 0),
++        Some(Token::Built) => (Some("#0a7285"), Some("#6fd3d8"), 0),
++        Some(Token::Deletion) => (Some("#cf222e"), Some("#f87171"), 0),
++        Some(Token::Bold) => (None, None, 2),
++        Some(Token::Italic) => (None, None, 1),
++        None | Some(Token::Operator) | Some(Token::Storage) => (None, None, 0),
++    }
++}
++
++/// Highlights `code` in `language` into line spans of `(text, light_hex, dark_hex, style_mask)`.
++#[cfg(feature = "highlight")]
++pub fn r3_highlight_lines(
++    language: &str,
++    code: &str,
++) -> Option<Vec<Vec<(String, Option<&'static str>, Option<&'static str>, u8)>>> {
++    let syntax = find_syntax(language)?;
++    let set = syntaxes();
++    let mut parse = Parse::new(syntax);
++    let mut out = Vec::new();
++    let mut with_nl = String::new();
++    for raw_line in code.split('\n') {
++        with_nl.clear();
++        with_nl.push_str(raw_line);
++        with_nl.push('\n');
++        let mut spans: Vec<(String, Option<&'static str>, Option<&'static str>, u8)> = Vec::new();
++        let Parse { state, scopes } = &mut parse;
++        if let Ok(ops) = state.parse_line(&with_nl, set) {
++            let mut at = 0usize;
++            for (offset, op) in ops {
++                let end = offset.min(raw_line.len());
++                if end > at {
++                    let piece = &raw_line[at..end];
++                    let (light, dark, style) = r3_token_colors(scope_token(scopes, piece));
++                    if let Some(last) = spans.last_mut()
++                        && last.1 == light
++                        && last.2 == dark
++                        && last.3 == style
++                    {
++                        last.0.push_str(piece);
++                    } else {
++                        spans.push((piece.to_owned(), light, dark, style));
++                    }
++                    at = end;
++                }
++                let _ = scopes.apply(&op);
++            }
++            if at < raw_line.len() {
++                let piece = &raw_line[at..];
++                let (light, dark, style) = r3_token_colors(scope_token(scopes, piece));
++                if let Some(last) = spans.last_mut()
++                    && last.1 == light
++                    && last.2 == dark
++                    && last.3 == style
++                {
++                    last.0.push_str(piece);
++                } else {
++                    spans.push((piece.to_owned(), light, dark, style));
++                }
++            }
++        } else if !raw_line.is_empty() {
++            spans.push((raw_line.to_owned(), None, None, 0));
++        }
++        out.push(spans);
++    }
++    Some(out)
++}
++
++/// Highlights `code` in `language` into line spans of `(text, light_hex, dark_hex, style_mask)`.
++#[cfg(not(feature = "highlight"))]
++pub fn r3_highlight_lines(
++    _language: &str,
++    _code: &str,
++) -> Option<Vec<Vec<(String, Option<&'static str>, Option<&'static str>, u8)>>> {
++    None
++}
+diff --git a/crates/nsh-base/src/text_view/math.rs b/crates/nsh-base/src/text_view/math.rs
+index b1a647e..e9d4374 100644
+--- a/crates/nsh-base/src/text_view/math.rs
++++ b/crates/nsh-base/src/text_view/math.rs
+@@ -301,6 +301,223 @@ pub(super) fn formula(tex: &str, display: bool, size: f32) -> Option<AnyElement>
+     Some(render(&typeset(tex, display)?, size, display))
+ }
+ 
++struct SvgOutline {
++    d: String,
++    x: f32,
++    y: f32,
++    scale: f32,
++}
++
++impl ttf_parser::OutlineBuilder for SvgOutline {
++    fn move_to(&mut self, x: f32, y: f32) {
++        use std::fmt::Write;
++        let _ = write!(self.d, "M{:.2} {:.2}", self.x + x * self.scale, self.y - y * self.scale);
++    }
++
++    fn line_to(&mut self, x: f32, y: f32) {
++        use std::fmt::Write;
++        let _ = write!(self.d, "L{:.2} {:.2}", self.x + x * self.scale, self.y - y * self.scale);
++    }
++
++    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
++        use std::fmt::Write;
++        let _ = write!(
++            self.d,
++            "Q{:.2} {:.2} {:.2} {:.2}",
++            self.x + x1 * self.scale,
++            self.y - y1 * self.scale,
++            self.x + x * self.scale,
++            self.y - y * self.scale,
++        );
++    }
++
++    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
++        use std::fmt::Write;
++        let _ = write!(
++            self.d,
++            "C{:.2} {:.2} {:.2} {:.2} {:.2} {:.2}",
++            self.x + x1 * self.scale,
++            self.y - y1 * self.scale,
++            self.x + x2 * self.scale,
++            self.y - y2 * self.scale,
++            self.x + x * self.scale,
++            self.y - y * self.scale,
++        );
++    }
++
++    fn close(&mut self) {
++        self.d.push('Z');
++    }
++}
++
++fn svg_paint(color: &TexColor) -> String {
++    if *color == TexColor::BLACK {
++        "currentColor".to_owned()
++    } else {
++        format!(
++            "rgba({},{},{},{:.3})",
++            (color.r.clamp(0.0, 1.0) * 255.0).round() as u8,
++            (color.g.clamp(0.0, 1.0) * 255.0).round() as u8,
++            (color.b.clamp(0.0, 1.0) * 255.0).round() as u8,
++            color.a.clamp(0.0, 1.0),
++        )
++    }
++}
++
++/// Typesets TeX math into a standalone SVG using RaTeX and the embedded KaTeX fonts.
++pub fn r3_tex_to_svg(tex: &str, display: bool) -> Option<String> {
++    use std::fmt::Write;
++    let formula = typeset(tex, display)?;
++    let list = &formula.list;
++    let size = 16.0_f32;
++    let pt = |v: f64| v as f32 * size;
++    let above = list.height + OVERSHOOT;
++    let below = list.depth + OVERSHOOT;
++    let w_ex = (list.width * 2.0).max(0.01);
++    let h_ex = ((above + below) * 2.0).max(0.01);
++    let d_ex = below * 2.0;
++    let w_px = (list.width as f32 * size).max(0.5);
++    let h_px = ((above + below) as f32 * size).max(0.5);
++    let top = (above - list.height) as f32 * size;
++
++    let mut body = String::new();
++    for item in &list.items {
++        match item {
++            DisplayItem::GlyphPath {
++                x,
++                y,
++                scale,
++                font,
++                char_code,
++                color,
++            } => {
++                let Some(f) = face(font) else {
++                    continue;
++                };
++                let id = FontId::parse(font).unwrap_or(FontId::MainRegular);
++                let ch = ratex_font::katex_ttf_glyph_char(id, *char_code);
++                let Some(glyph) = f.glyph_index(ch) else {
++                    continue;
++                };
++                let units = f32::from(f.units_per_em());
++                let mut outline = SvgOutline {
++                    d: String::new(),
++                    x: pt(*x),
++                    y: top + pt(*y),
++                    scale: size * *scale as f32 / units,
++                };
++                f.outline_glyph(glyph, &mut outline);
++                if !outline.d.is_empty() {
++                    let _ = write!(body, "<path d=\"{}\" fill=\"{}\"/>", outline.d, svg_paint(color));
++                }
++            }
++            DisplayItem::Line {
++                x,
++                y,
++                width,
++                thickness,
++                color,
++                ..
++            } => {
++                let t = pt(*thickness).max(1.0);
++                let _ = write!(
++                    body,
++                    "<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" fill=\"{}\"/>",
++                    pt(*x),
++                    top + pt(*y) - t / 2.0,
++                    pt(*width),
++                    t,
++                    svg_paint(color),
++                );
++            }
++            DisplayItem::Rect {
++                x,
++                y,
++                width,
++                height,
++                color,
++            } => {
++                let _ = write!(
++                    body,
++                    "<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" fill=\"{}\"/>",
++                    pt(*x),
++                    top + pt(*y),
++                    pt(*width),
++                    pt(*height),
++                    svg_paint(color),
++                );
++            }
++            DisplayItem::Path {
++                x,
++                y,
++                commands,
++                fill,
++                color,
++            } => {
++                let ox = pt(*x);
++                let oy = top + pt(*y);
++                let mut d = String::new();
++                for c in commands {
++                    match *c {
++                        PathCommand::MoveTo { x, y } => {
++                            let _ = write!(d, "M{:.2} {:.2}", ox + pt(x), oy + pt(y));
++                        }
++                        PathCommand::LineTo { x, y } => {
++                            let _ = write!(d, "L{:.2} {:.2}", ox + pt(x), oy + pt(y));
++                        }
++                        PathCommand::QuadTo { x1, y1, x, y } => {
++                            let _ = write!(
++                                d,
++                                "Q{:.2} {:.2} {:.2} {:.2}",
++                                ox + pt(x1),
++                                oy + pt(y1),
++                                ox + pt(x),
++                                oy + pt(y),
++                            );
++                        }
++                        PathCommand::CubicTo {
++                            x1,
++                            y1,
++                            x2,
++                            y2,
++                            x,
++                            y,
++                        } => {
++                            let _ = write!(
++                                d,
++                                "C{:.2} {:.2} {:.2} {:.2} {:.2} {:.2}",
++                                ox + pt(x1),
++                                oy + pt(y1),
++                                ox + pt(x2),
++                                oy + pt(y2),
++                                ox + pt(x),
++                                oy + pt(y),
++                            );
++                        }
++                        PathCommand::Close => d.push('Z'),
++                    }
++                }
++                if !d.is_empty() {
++                    if *fill {
++                        let _ = write!(body, "<path d=\"{d}\" fill=\"{}\"/>", svg_paint(color));
++                    } else {
++                        let _ = write!(
++                            body,
++                            "<path d=\"{d}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{:.2}\"/>",
++                            svg_paint(color),
++                            (size * 0.04).max(1.0),
++                        );
++                    }
++                }
++            }
++        }
++    }
++
++    Some(format!(
++        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w_ex:.3}ex\" height=\"{h_ex:.3}ex\" style=\"vertical-align: -{d_ex:.3}ex\" viewBox=\"0 0 {w_px:.2} {h_px:.2}\">{body}</svg>"
++    ))
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/crates/nsh-base/src/text_view/mod.rs b/crates/nsh-base/src/text_view/mod.rs
+index 30bec9c..35ff9d6 100644
+--- a/crates/nsh-base/src/text_view/mod.rs
++++ b/crates/nsh-base/src/text_view/mod.rs
+@@ -11,6 +11,13 @@ mod html;
+ mod markdown;
+ #[cfg(feature = "math")]
+ mod math;
++#[cfg(feature = "math")]
++pub use self::math::r3_tex_to_svg;
++/// Typesets TeX math into a standalone SVG when the `math` feature is enabled.
++#[cfg(not(feature = "math"))]
++pub fn r3_tex_to_svg(_tex: &str, _display: bool) -> Option<String> {
++    None
++}
+ mod parts;
+ mod selection;
+ mod tex_text;
+diff --git a/crates/nsh-core/src/runtime/websocket.rs b/crates/nsh-core/src/runtime/websocket.rs
+index 83c067c..c6d7a81 100644
+--- a/crates/nsh-core/src/runtime/websocket.rs
++++ b/crates/nsh-core/src/runtime/websocket.rs
+@@ -49,7 +49,7 @@ use crate::{
+ mod native;
+ /// The largest message one write sends or one read returns, and the bytes
+ /// of unread messages past which reading pauses.
+-const LIMIT: usize = 8 * 1024 * 1024;
++const LIMIT: usize = 128 * 1024 * 1024;
+ /// Unread messages at which reading pauses.
+ const UNREAD: usize = 8;
+ /// The longest close reason, in UTF-8 bytes: what fits a control frame's
+diff --git a/crates/nsh-core/src/runtime/websocket/native.rs b/crates/nsh-core/src/runtime/websocket/native.rs
+index e802846..605a9c4 100644
+--- a/crates/nsh-core/src/runtime/websocket/native.rs
++++ b/crates/nsh-core/src/runtime/websocket/native.rs
+@@ -32,7 +32,7 @@ use super::{
+ use crate::element::{Held, JsError, Later, Spawned, System, io_code, spawn};
+ 
+ /// The largest message one write sends or one read returns.
+-const LIMIT: usize = 8 * 1024 * 1024;
++const LIMIT: usize = 128 * 1024 * 1024;
+ /// How long resolving, connecting with the handshake, a write and closing
+ /// may take.
+ const TIMEOUT: Duration = Duration::from_secs(30);
+diff --git a/crates/nsh-js/src/standard/websocket.rs b/crates/nsh-js/src/standard/websocket.rs
+index 7023dbb..3480696 100644
+--- a/crates/nsh-js/src/standard/websocket.rs
++++ b/crates/nsh-js/src/standard/websocket.rs
+@@ -27,7 +27,7 @@ use nsh_core::{
+ };
+ use rquickjs::{Ctx, Exception, Function, Object, Result, Value, function::Func};
+ 
+-const MAX_MESSAGE: usize = 8 * 1024 * 1024;
++const MAX_MESSAGE: usize = 128 * 1024 * 1024;
+ const QUEUE: usize = 32;
+ 
+ /// Throws `error` with its class and properties (`code`, ...).
+@@ -261,7 +261,7 @@ fn open<'js>(
+                 if blob.bytes().len() > MAX_MESSAGE {
+                     return Err(Exception::throw_range(
+                         &cx,
+-                        "WebSocket message exceeds 8 MiB",
++                        "WebSocket message exceeds 128 MiB",
+                     ));
+                 }
+                 WebSocketData::Bytes(blob.bytes().to_vec())
+@@ -278,7 +278,7 @@ fn open<'js>(
+                 if bytes.len() > MAX_MESSAGE {
+                     return Err(Exception::throw_range(
+                         &cx,
+-                        "WebSocket message exceeds 8 MiB",
++                        "WebSocket message exceeds 128 MiB",
+                     ));
+                 }
+                 WebSocketData::Bytes(bytes.to_vec())
+@@ -290,7 +290,7 @@ fn open<'js>(
+             if size > MAX_MESSAGE {
+                 return Err(Exception::throw_range(
+                     &cx,
+-                    "WebSocket message exceeds 8 MiB",
++                    "WebSocket message exceeds 128 MiB",
+                 ));
+             }
+             // A socket that is closing discards what is sent, as a
+diff --git a/crates/nsh-js/src/standard/websocket_native.rs b/crates/nsh-js/src/standard/websocket_native.rs
+index 9de3a3b..6535495 100644
+--- a/crates/nsh-js/src/standard/websocket_native.rs
++++ b/crates/nsh-js/src/standard/websocket_native.rs
+@@ -15,7 +15,7 @@ use tokio_tungstenite::tungstenite::{
+     protocol::{CloseFrame, WebSocketConfig, frame::coding::CloseCode},
+ };
+ 
+-const MAX_MESSAGE: usize = 8 * 1024 * 1024;
++const MAX_MESSAGE: usize = 128 * 1024 * 1024;
+ /// Messages one socket delivers before it lets the engine's turn end.
+ const MESSAGES_PER_TURN: usize = 32;
+ 
+@@ -176,7 +176,7 @@ fn open<'js>(
+                 if text.len() > MAX_MESSAGE {
+                     return Err(Exception::throw_range(
+                         &send_cx,
+-                        "WebSocket message exceeds 8 MiB",
++                        "WebSocket message exceeds 128 MiB",
+                     ));
+                 }
+                 Message::Text(text.into())
+@@ -187,7 +187,7 @@ fn open<'js>(
+                 if blob.bytes().len() > MAX_MESSAGE {
+                     return Err(Exception::throw_range(
+                         &send_cx,
+-                        "WebSocket message exceeds 8 MiB",
++                        "WebSocket message exceeds 128 MiB",
+                     ));
+                 }
+                 Message::Binary(blob.bytes().to_vec().into())
+@@ -204,7 +204,7 @@ fn open<'js>(
+                 if bytes.len() > MAX_MESSAGE {
+                     return Err(Exception::throw_range(
+                         &send_cx,
+-                        "WebSocket message exceeds 8 MiB",
++                        "WebSocket message exceeds 128 MiB",
+                     ));
+                 }
+                 Message::Binary(bytes.to_vec().into())
+diff --git a/crates/nsh-platform-windows/src/app.rs b/crates/nsh-platform-windows/src/app.rs
+index d3421ba..4f7d48f 100644
+--- a/crates/nsh-platform-windows/src/app.rs
++++ b/crates/nsh-platform-windows/src/app.rs
+@@ -751,6 +751,7 @@ fn run_on_this_thread(source: AppSource, options: AppOptions) -> std::process::E
+         }
+     };
+     view.standalone.set(true);
++    crate::r3_host::register(&view, &options);
+     crate::linking::launch(view.surface());
+     match source {
+         AppSource::Rust(root) => view.load(App::Rust(root)),
+diff --git a/crates/nsh-platform-windows/src/gfx.rs b/crates/nsh-platform-windows/src/gfx.rs
+index 63b3d52..5583d8b 100644
+--- a/crates/nsh-platform-windows/src/gfx.rs
++++ b/crates/nsh-platform-windows/src/gfx.rs
+@@ -55,7 +55,8 @@ use windows::{
+                 DXGI_PRESENT_PARAMETERS, DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1,
+                 DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
+                 DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice,
+-                IDXGIDevice1, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, IDXGISwapChain2,
++                IDXGIDevice1, IDXGIDevice3, IDXGIFactory2, IDXGISurface, IDXGISwapChain1,
++                IDXGISwapChain2,
+             },
+         },
+         System::Threading::{
+@@ -109,6 +110,17 @@ pub(crate) fn generation() -> u64 {
+     GENERATION.with(Cell::get)
+ }
+ 
++pub(crate) fn trim() {
++    GFX.with(|cell| {
++        if let Some(g) = cell.borrow().as_ref()
++            && let Ok(dxgi3) = g.d3d.cast::<IDXGIDevice3>()
++        {
++            // SAFETY: COM call on a live DXGI device on its owning thread.
++            unsafe { dxgi3.Trim() };
++        }
++    });
++}
++
+ impl Gfx {
+     fn new() -> Result<Gfx> {
+         let d3d = create_d3d(D3D_DRIVER_TYPE_HARDWARE).or_else(|err| {
+diff --git a/crates/nsh-platform-windows/src/lib.rs b/crates/nsh-platform-windows/src/lib.rs
+index acb4999..3618db1 100644
+--- a/crates/nsh-platform-windows/src/lib.rs
++++ b/crates/nsh-platform-windows/src/lib.rs
+@@ -54,6 +54,7 @@ mod native;
+ mod navigation;
+ mod notifications;
+ mod picker;
++mod r3_host;
+ mod presence;
+ mod render;
+ mod richedit;
+diff --git a/crates/nsh-platform-windows/src/mount.rs b/crates/nsh-platform-windows/src/mount.rs
+index cde2d9f..5d56b95 100644
+--- a/crates/nsh-platform-windows/src/mount.rs
++++ b/crates/nsh-platform-windows/src/mount.rs
+@@ -452,6 +452,9 @@ impl Mounter {
+             // focus as Tab gives it.
+             Command::Focus => match view {
+                 Some(view) if view.kind() == ViewKind::Input => crate::text_input::focus(view),
++                Some(view) if view.kind() == ViewKind::WebView => {
++                    crate::native::command(surface, view, command);
++                }
+                 Some(view) if view.id() != ROOT_ID => {
+                     crate::keyboard::focus_control(surface, view);
+                 }
+@@ -459,6 +462,9 @@ impl Mounter {
+             },
+             Command::Blur => match view {
+                 Some(view) if view.kind() == ViewKind::Input => crate::text_input::blur(view),
++                Some(view) if view.kind() == ViewKind::WebView => {
++                    crate::native::command(surface, view, command);
++                }
+                 Some(view) if view.id() != ROOT_ID && crate::keyboard::blur(surface, view) => {}
+                 _ => crate::text_input::blur_all(surface),
+             },
+diff --git a/crates/nsh-platform-windows/src/native.rs b/crates/nsh-platform-windows/src/native.rs
+index f2e455d..79ea82b 100644
+--- a/crates/nsh-platform-windows/src/native.rs
++++ b/crates/nsh-platform-windows/src/native.rs
+@@ -47,6 +47,16 @@ mod video;
+ #[cfg(feature = "webview")]
+ mod web;
+ 
++#[cfg(feature = "webview")]
++pub(crate) fn read_clerk_client_cookie(url: &str, done: impl FnOnce(Option<String>) + 'static) {
++    web::read_clerk_client_cookie(url, done);
++}
++
++#[cfg(not(feature = "webview"))]
++pub(crate) fn read_clerk_client_cookie(_url: &str, done: impl FnOnce(Option<String>) + 'static) {
++    done(None);
++}
++
+ use std::{
+     cell::{Cell, RefCell},
+     rc::{Rc, Weak},
+diff --git a/crates/nsh-platform-windows/src/native/web.rs b/crates/nsh-platform-windows/src/native/web.rs
+index 63576c4..30d0be4 100644
+--- a/crates/nsh-platform-windows/src/native/web.rs
++++ b/crates/nsh-platform-windows/src/native/web.rs
+@@ -102,7 +102,7 @@ use webview2_com::{
+     AddScriptToExecuteOnDocumentCreatedCompletedHandler,
+     CreateCoreWebView2CompositionControllerCompletedHandler,
+     CreateCoreWebView2EnvironmentCompletedHandler, CursorChangedEventHandler,
+-    DownloadStartingEventHandler, FocusChangedEventHandler,
++    DownloadStartingEventHandler, FocusChangedEventHandler, GetCookiesCompletedHandler,
+     Microsoft::Web::WebView2::Win32::{
+         COREWEBVIEW2_COLOR, COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON,
+         COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_HASH_MISMATCH,
+@@ -182,6 +182,82 @@ use crate::{
+ /// Lets pages talk to the app: `window.nsh.postMessage(data)`.
+ const BRIDGE: &str = "window.nsh = window.nsh || { postMessage: function (data) { window.chrome.webview.postMessage(String(data)); } };";
+ 
++thread_local! {
++    static LIVE_WEBVIEWS: RefCell<Vec<Weak<WebItem>>> = const { RefCell::new(Vec::new()) };
++}
++
++pub(crate) fn read_clerk_client_cookie(
++    url: &str,
++    done: impl FnOnce(Option<String>) + 'static,
++) {
++    let webview = LIVE_WEBVIEWS.with(|cell| {
++        let mut list = cell.borrow_mut();
++        list.retain(|w| w.strong_count() > 0);
++        list.iter().rev().find_map(|w| {
++            let item = w.upgrade()?;
++            if item.closed.get() || item.props.borrow().as_ref().is_some_and(|p| p.incognito) {
++                return None;
++            }
++            item.webview.borrow().clone()
++        })
++    });
++    let Some(webview2) = webview.and_then(|w| w.cast::<ICoreWebView2_2>().ok()) else {
++        done(None);
++        return;
++    };
++    // SAFETY: COM call on live ICoreWebView2_2 on its owning UI thread.
++    let Ok(manager) = (unsafe { webview2.CookieManager() }) else {
++        done(None);
++        return;
++    };
++    let done = Rc::new(RefCell::new(Some(done)));
++    let cb_done = Rc::clone(&done);
++    let handler = GetCookiesCompletedHandler::create(Box::new(move |result, list| {
++        let mut exact: Option<String> = None;
++        let mut fallback: Option<String> = None;
++        if result.is_ok()
++            && let Some(list) = list
++        {
++            let mut count = 0u32;
++            // SAFETY: COM calls on live ICoreWebView2CookieList returned by WebView2.
++            if unsafe { list.Count(&mut count) }.is_ok() {
++                for index in 0..count {
++                    if let Ok(cookie) = unsafe { list.GetValueAtIndex(index) } {
++                        let mut cname = PWSTR::null();
++                        if unsafe { cookie.Name(&mut cname) }.is_ok() {
++                            let name = take_pwstr(cname);
++                            if name == "__client" || name.starts_with("__client_") {
++                                let mut cval = PWSTR::null();
++                                if unsafe { cookie.Value(&mut cval) }.is_ok() {
++                                    let val = take_pwstr(cval);
++                                    if val.split('.').count() == 3 {
++                                        if name == "__client" {
++                                            exact = Some(val);
++                                            break;
++                                        } else if fallback.is_none() {
++                                            fallback = Some(val);
++                                        }
++                                    }
++                                }
++                            }
++                        }
++                    }
++                }
++            }
++        }
++        if let Some(cb) = cb_done.borrow_mut().take() {
++            cb(exact.or(fallback));
++        }
++        Ok(())
++    }));
++    // SAFETY: COM call on live ICoreWebView2CookieManager on its owning UI thread.
++    if unsafe { manager.GetCookies(&HSTRING::from(url), &handler) }.is_err()
++        && let Some(cb) = done.borrow_mut().take()
++    {
++        cb(None);
++    }
++}
++
+ // `CreateCoreWebView2EnvironmentWithOptions`.
+ //
+ // With MSVC the loader is linked statically (`WebView2LoaderStatic.lib`,
+@@ -848,6 +924,13 @@ impl WebItem {
+         *self.composition.borrow_mut() = Some(composition);
+         *self.controller.borrow_mut() = Some(controller);
+         *self.webview.borrow_mut() = Some(webview);
++        if let Some(me) = self.me.borrow().upgrade() {
++            LIVE_WEBVIEWS.with(|cell| {
++                let mut list = cell.borrow_mut();
++                list.retain(|w| w.strong_count() > 0);
++                list.push(Rc::downgrade(&me));
++            });
++        }
+         self.paint_background();
+         self.bounds.set(None);
+         self.place();
+@@ -1852,6 +1935,14 @@ impl WebItem {
+                     webview.ExecuteScript(&HSTRING::from(post_message(data)), none)
+                 }
+                 Command::Load(load) => self.load(&webview, load),
++                Command::Focus => {
++                    self.take_focus();
++                    Ok(())
++                }
++                Command::Blur => {
++                    self.focus_window();
++                    Ok(())
++                }
+                 _ => Ok(()),
+             }
+         };
+diff --git a/crates/nsh-platform-windows/src/r3_host.rs b/crates/nsh-platform-windows/src/r3_host.rs
+new file mode 100644
+index 0000000..c407f0b
+--- /dev/null
++++ b/crates/nsh-platform-windows/src/r3_host.rs
+@@ -0,0 +1,819 @@
++//! R3 Code desktop host handlers on Windows: live theme overrides, WebView2
++//! layering/focus capabilities, DPAPI-backed secure storage, and native file/folder
++//! dialogs.
++
++use std::{
++    collections::{HashMap, HashSet},
++    ffi::c_void,
++    fs,
++    path::{Path, PathBuf},
++    sync::{
++        Arc, Mutex, OnceLock,
++        atomic::{AtomicU64, Ordering},
++        mpsc,
++    },
++};
++
++static DPAPI_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
++
++struct RpcSchemaCatalog {
++    methods: HashMap<String, Value>,
++    definitions: HashMap<String, Value>,
++}
++
++static RPC_SCHEMA_CATALOG: Mutex<Option<Arc<RpcSchemaCatalog>>> = Mutex::new(None);
++
++fn load_rpc_schema_catalog() -> Result<Arc<RpcSchemaCatalog>, String> {
++    if let Ok(guard) = RPC_SCHEMA_CATALOG.lock()
++        && let Some(existing) = guard.as_ref()
++    {
++        return Ok(Arc::clone(existing));
++    }
++    let path = std::env::current_exe()
++        .map_err(|err| format!("Could not resolve executable path: {err}"))?
++        .parent()
++        .ok_or_else(|| "Executable has no parent directory".to_owned())?
++        .join("nsh")
++        .join("assets")
++        .join("data")
++        .join("rpcResultSchemas.json");
++    let text = fs::read_to_string(&path)
++        .map_err(|err| format!("Could not read RPC result schemas: {err}"))?;
++    let root: Value = serde_json::from_str(&text)
++        .map_err(|err| format!("Invalid RPC result schema JSON: {err}"))?;
++    let methods = root
++        .get("methods")
++        .and_then(Value::as_object)
++        .ok_or_else(|| "RPC result schema catalog is missing methods".to_owned())?
++        .iter()
++        .map(|(k, v)| (k.clone(), v.clone()))
++        .collect::<HashMap<_, _>>();
++    let definitions = root
++        .get("definitions")
++        .and_then(Value::as_object)
++        .ok_or_else(|| "RPC result schema catalog is missing definitions".to_owned())?
++        .iter()
++        .map(|(k, v)| (k.clone(), v.clone()))
++        .collect::<HashMap<_, _>>();
++    let catalog = Arc::new(RpcSchemaCatalog { methods, definitions });
++    if let Ok(mut guard) = RPC_SCHEMA_CATALOG.lock() {
++        *guard = Some(Arc::clone(&catalog));
++    }
++    Ok(catalog)
++}
++
++fn collect_schema_refs(
++    root: &Value,
++    all_defs: &HashMap<String, Value>,
++    out: &mut serde_json::Map<String, Value>,
++) -> Result<(), String> {
++    let mut stack: Vec<&Value> = vec![root];
++    let mut visited_defs: HashSet<String> = HashSet::new();
++    while let Some(node) = stack.pop() {
++        match node {
++            Value::Object(map) => {
++                if let Some(mut raw_ref) = map.get("$ref").and_then(Value::as_str) {
++                    let mut hops = 0usize;
++                    loop {
++                        hops += 1;
++                        if hops > 32 {
++                            return Err("RPC result schema $ref nesting depth exceeded".to_owned());
++                        }
++                        let name = raw_ref
++                            .strip_prefix("#/$defs/")
++                            .or_else(|| raw_ref.strip_prefix("#/definitions/"))
++                            .unwrap_or(raw_ref);
++                        let target = all_defs
++                            .get(name)
++                            .ok_or_else(|| format!("RPC result schema references missing definition: {name}"))?;
++                        if visited_defs.insert(name.to_owned()) {
++                            out.insert(name.to_owned(), target.clone());
++                            stack.push(target);
++                        }
++                        if let Some(next_ref) = target.get("$ref").and_then(Value::as_str) {
++                            raw_ref = next_ref;
++                        } else {
++                            break;
++                        }
++                    }
++                }
++                for child in map.values() {
++                    stack.push(child);
++                }
++            }
++            Value::Array(items) => {
++                for item in items {
++                    stack.push(item);
++                }
++            }
++            _ => {}
++        }
++    }
++    Ok(())
++}
++
++fn rpc_method_schema_response(catalog: &RpcSchemaCatalog, method: &str) -> Result<Value, String> {
++    let Some(schema) = catalog.methods.get(method) else {
++        return Ok(json!({ "found": false }));
++    };
++    let mut defs = serde_json::Map::new();
++    collect_schema_refs(schema, &catalog.definitions, &mut defs)?;
++    Ok(json!({
++        "found": true,
++        "schema": schema,
++        "definitions": Value::Object(defs),
++    }))
++}
++
++type RenderJob = Box<dyn FnOnce() + Send>;
++
++const RENDER_POOL_WORKERS: usize = 2;
++const RENDER_POOL_QUEUE: usize = 64;
++
++fn render_pool() -> &'static mpsc::SyncSender<RenderJob> {
++    static POOL: OnceLock<mpsc::SyncSender<RenderJob>> = OnceLock::new();
++    POOL.get_or_init(|| {
++        let (tx, rx) = mpsc::sync_channel::<RenderJob>(RENDER_POOL_QUEUE);
++        let shared = Arc::new(Mutex::new(rx));
++        for idx in 0..RENDER_POOL_WORKERS {
++            let rx = Arc::clone(&shared);
++            let _ = std::thread::Builder::new()
++                .name(format!("r3-worker-{idx}"))
++                .spawn(move || loop {
++                    let job = {
++                        let Ok(guard) = rx.lock() else { break };
++                        guard.recv()
++                    };
++                    match job {
++                        Ok(run) => run(),
++                        Err(_) => break,
++                    }
++                });
++        }
++        tx
++    })
++}
++
++fn try_enqueue_render_job(job: RenderJob) -> Result<(), RenderJob> {
++    match render_pool().try_send(job) {
++        Ok(()) => Ok(()),
++        Err(mpsc::TrySendError::Full(job) | mpsc::TrySendError::Disconnected(job)) => Err(job),
++    }
++}
++
++use serde_json::{Value, json};
++use windows::{
++    Win32::{
++        Foundation::{HLOCAL, HWND, LocalFree},
++        Security::Cryptography::{
++            CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
++        },
++        System::Com::{
++            CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
++            CoTaskMemFree, CoUninitialize,
++        },
++        UI::Shell::{
++            Common::COMDLG_FILTERSPEC, FOS_ALLOWMULTISELECT, FOS_FILEMUSTEXIST,
++            FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, IShellItem,
++            SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
++        },
++    },
++    core::{HSTRING, PCWSTR},
++};
++
++use crate::{
++    app::{AppOptions, AppView},
++    surface::Surface,
++    window::UiThread,
++};
++
++pub(crate) fn register(view: &AppView, options: &AppOptions) {
++    let host = options.host.clone();
++    let surface_key = view.surface().key();
++    let ui = UiThread::current();
++    let owner = view.hwnd().0 as isize;
++    let secure_root = resolve_secure_dir(options);
++
++    host.handle("desktop.capabilities", |call| {
++        call.resolve(json!([]));
++    });
++
++    host.handle("webview.underSurface", |call| {
++        call.resolve(Value::Bool(true));
++    });
++
++    host.handle("webview.nativeFocus", |call| {
++        call.resolve(Value::Bool(true));
++    });
++
++    host.handle("theme.setOverrides", move |call| {
++        let json_text: Option<String> = match call.data() {
++            Value::Null => None,
++            other => Some(other.to_string()),
++        };
++        let tokens = match json_text.as_deref().map(nsh_base::theme_overrides).transpose() {
++            Ok(tokens) => tokens,
++            Err(err) => {
++                call.reject(err.to_string());
++                return;
++            }
++        };
++        call.resolve(Value::Null);
++        ui.invoke(move || {
++            let Some(surface) = Surface::by_key(surface_key) else {
++                return;
++            };
++            *surface.host_tokens.borrow_mut() = tokens.clone();
++            surface.control(|c| c.set_tokens(tokens));
++        });
++    });
++
++    let avail_root = secure_root.clone();
++    host.handle("secureStorage.available", move |call| {
++        call.resolve(Value::Bool(avail_root.is_some()));
++    });
++
++    let get_root = secure_root.clone();
++    host.handle("secureStorage.get", move |call| {
++        let Some(root) = get_root.as_ref() else {
++            call.reject("Windows secure storage directory is unavailable.");
++            return;
++        };
++        match parse_account(call.data()).and_then(|(service, account)| dpapi_get(root, &service, &account)) {
++            Ok(Some(value)) => call.resolve(Value::String(value)),
++            Ok(None) => call.resolve(Value::Null),
++            Err(err) => call.reject(err),
++        }
++    });
++
++    let set_root = secure_root.clone();
++    host.handle("secureStorage.set", move |call| {
++        let Some(root) = set_root.as_ref() else {
++            call.reject("Windows secure storage directory is unavailable.");
++            return;
++        };
++        let result = parse_account(call.data()).and_then(|(service, account)| {
++            let value = call
++                .data()
++                .get("value")
++                .and_then(Value::as_str)
++                .ok_or_else(|| "secureStorage.set requires a string value".to_owned())?;
++            dpapi_set(root, &service, &account, value)
++        });
++        match result {
++            Ok(()) => call.resolve(Value::Null),
++            Err(err) => call.reject(err),
++        }
++    });
++
++    let remove_root = secure_root;
++    host.handle("secureStorage.remove", move |call| {
++        let Some(root) = remove_root.as_ref() else {
++            call.reject("Windows secure storage directory is unavailable.");
++            return;
++        };
++        match parse_account(call.data()).and_then(|(service, account)| dpapi_remove(root, &service, &account)) {
++            Ok(()) => call.resolve(Value::Null),
++            Err(err) => call.reject(err),
++        }
++    });
++
++    host.handle("dialogs.pickFolder", move |call| {
++        let initial = call
++            .data()
++            .get("initialPath")
++            .and_then(Value::as_str)
++            .map(str::to_owned);
++        let Some(reply) = call.into_reply() else {
++            return;
++        };
++        let _ = std::thread::Builder::new()
++            .name("r3-pick-folder".into())
++            .spawn(move || {
++                let res = pick_folder(HWND(owner as *mut c_void), initial.as_deref())
++                    .map(|p| p.map(Value::String).unwrap_or(Value::Null));
++                reply.reply(res);
++            });
++    });
++
++    host.handle("dialogs.pickFiles", move |call| {
++        let images_only = call
++            .data()
++            .get("imagesOnly")
++            .and_then(Value::as_bool)
++            .unwrap_or(false);
++        let initial = call
++            .data()
++            .get("initialPath")
++            .and_then(Value::as_str)
++            .map(str::to_owned);
++        let multiple = call
++            .data()
++            .get("multiple")
++            .and_then(Value::as_bool)
++            .unwrap_or(true);
++        let Some(reply) = call.into_reply() else {
++            return;
++        };
++        let _ = std::thread::Builder::new()
++            .name("r3-pick-files".into())
++            .spawn(move || {
++                let res = pick_files(
++                    HWND(owner as *mut c_void),
++                    images_only,
++                    multiple,
++                    initial.as_deref(),
++                )
++                .map(|paths| Value::Array(paths.into_iter().map(Value::String).collect()));
++                reply.reply(res);
++            });
++    });
++
++    host.handle("r3.highlight", |call| {
++        let lang = call
++            .data()
++            .get("lang")
++            .and_then(Value::as_str)
++            .unwrap_or("")
++            .to_owned();
++        let code = call
++            .data()
++            .get("code")
++            .and_then(Value::as_str)
++            .unwrap_or("")
++            .to_owned();
++        if lang.is_empty() || code.len() > 512 * 1024 {
++            call.resolve(Value::Null);
++            return;
++        }
++        let Some(reply) = call.into_reply() else {
++            return;
++        };
++        let reply = Arc::new(Mutex::new(Some(reply)));
++        let job_reply = Arc::clone(&reply);
++        if try_enqueue_render_job(Box::new(move || {
++            let value = match nsh_base::r3_highlight_lines(&lang, &code) {
++                Some(lines) => Value::Array(
++                    lines
++                        .into_iter()
++                        .map(|line| {
++                            Value::Array(
++                                line.into_iter()
++                                    .map(|(text, light, dark, style)| {
++                                        Value::Array(vec![
++                                            Value::String(text),
++                                            light.map_or(Value::Null, |c| Value::String(c.to_owned())),
++                                            dark.map_or(Value::Null, |c| Value::String(c.to_owned())),
++                                            Value::Number(style.into()),
++                                        ])
++                                    })
++                                    .collect(),
++                            )
++                        })
++                        .collect(),
++                ),
++                None => Value::Null,
++            };
++            if let Ok(mut slot) = job_reply.lock()
++                && let Some(r) = slot.take()
++            {
++                r.reply(Ok(value));
++            }
++        }))
++        .is_err()
++            && let Ok(mut slot) = reply.lock()
++            && let Some(r) = slot.take()
++        {
++            r.reply(Ok(Value::Null));
++        }
++    });
++
++    host.handle("r3.texToSvg", |call| {
++        let tex = call
++            .data()
++            .get("tex")
++            .and_then(Value::as_str)
++            .unwrap_or("")
++            .to_owned();
++        let display = call
++            .data()
++            .get("display")
++            .and_then(Value::as_bool)
++            .unwrap_or(false);
++        if tex.is_empty() || tex.len() > 32 * 1024 {
++            call.resolve(Value::Null);
++            return;
++        }
++        let Some(reply) = call.into_reply() else {
++            return;
++        };
++        let reply = Arc::new(Mutex::new(Some(reply)));
++        let job_reply = Arc::clone(&reply);
++        if try_enqueue_render_job(Box::new(move || {
++            let value = match nsh_base::r3_tex_to_svg(&tex, display) {
++                Some(svg) => Value::String(svg),
++                None => Value::Null,
++            };
++            if let Ok(mut slot) = job_reply.lock()
++                && let Some(r) = slot.take()
++            {
++                r.reply(Ok(value));
++            }
++        }))
++        .is_err()
++            && let Ok(mut slot) = reply.lock()
++            && let Some(r) = slot.take()
++        {
++            r.reply(Ok(Value::Null));
++        }
++    });
++
++    host.handle("r3.readLocale", |call| {
++        let locale = call
++            .data()
++            .get("locale")
++            .and_then(Value::as_str)
++            .unwrap_or("");
++        if !matches!(
++            locale,
++            "de" | "es" | "fr" | "ja" | "ko" | "pt-BR" | "ru" | "sv" | "zh"
++        ) {
++            call.resolve(Value::Null);
++            return;
++        }
++        let locale = locale.to_owned();
++        let Some(reply) = call.into_reply() else {
++            return;
++        };
++        let reply = Arc::new(Mutex::new(Some(reply)));
++        let job_reply = Arc::clone(&reply);
++        if try_enqueue_render_job(Box::new(move || {
++            let path = std::env::current_exe()
++                .ok()
++                .and_then(|exe| exe.parent().map(|dir| dir.join("nsh").join("assets").join("i18n").join(format!("{locale}.json"))));
++            let value = path
++                .and_then(|p| fs::read_to_string(p).ok())
++                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
++                .unwrap_or(Value::Null);
++            if let Ok(mut slot) = job_reply.lock()
++                && let Some(r) = slot.take()
++            {
++                r.reply(Ok(value));
++            }
++        }))
++        .is_err()
++            && let Ok(mut slot) = reply.lock()
++            && let Some(r) = slot.take()
++        {
++            r.reply(Ok(Value::Null));
++        }
++    });
++
++    host.handle("r3.readRpcMethodSchema", |call| {
++        let method = call
++            .data()
++            .get("method")
++            .and_then(Value::as_str)
++            .unwrap_or("");
++        if method.is_empty()
++            || method.len() > 128
++            || !method.bytes().all(|b| b.is_ascii_graphic())
++        {
++            call.reject("r3.readRpcMethodSchema requires a valid RPC method name.");
++            return;
++        }
++        let cached = RPC_SCHEMA_CATALOG
++            .lock()
++            .ok()
++            .and_then(|guard| guard.as_ref().map(Arc::clone));
++        if let Some(catalog) = cached {
++            let response = rpc_method_schema_response(&catalog, method);
++            match response {
++                Ok(value) => call.resolve(value),
++                Err(err) => call.reject(err),
++            }
++            return;
++        }
++        let method = method.to_owned();
++        let Some(reply) = call.into_reply() else {
++            return;
++        };
++        let reply = Arc::new(Mutex::new(Some(reply)));
++        let job_reply = Arc::clone(&reply);
++        if try_enqueue_render_job(Box::new(move || {
++            let response = load_rpc_schema_catalog()
++                .and_then(|catalog| rpc_method_schema_response(&catalog, &method));
++            if let Ok(mut slot) = job_reply.lock()
++                && let Some(r) = slot.take()
++            {
++                r.reply(response);
++            }
++        }))
++        .is_err()
++            && let Ok(mut slot) = reply.lock()
++            && let Some(r) = slot.take()
++        {
++            r.reply(Err("RPC schema worker queue is saturated.".to_owned()));
++        }
++    });
++
++    host.handle("r3.readNativeLicenses", |call| {
++        let Some(reply) = call.into_reply() else {
++            return;
++        };
++        let reply = Arc::new(Mutex::new(Some(reply)));
++        let job_reply = Arc::clone(&reply);
++        if try_enqueue_render_job(Box::new(move || {
++            let response = (|| -> Result<Value, String> {
++                let path = std::env::current_exe()
++                    .map_err(|err| format!("Could not resolve executable path: {err}"))?
++                    .parent()
++                    .ok_or_else(|| "Executable has no parent directory".to_owned())?
++                    .join("nsh")
++                    .join("assets")
++                    .join("data")
++                    .join("nativeDependencyNotices.json");
++                let text = fs::read_to_string(&path)
++                    .map_err(|err| format!("Could not read native dependency notices: {err}"))?;
++                let value: Value = serde_json::from_str(&text)
++                    .map_err(|err| format!("Invalid native dependency notices JSON: {err}"))?;
++                let valid = value.get("texts").is_some_and(Value::is_array)
++                    && value.get("packages").is_some_and(Value::is_array);
++                if !valid {
++                    return Err("Native dependency notices have an invalid shape.".to_owned());
++                }
++                Ok(value)
++            })();
++            if let Ok(mut slot) = job_reply.lock()
++                && let Some(r) = slot.take()
++            {
++                r.reply(response);
++            }
++        }))
++        .is_err()
++            && let Ok(mut slot) = reply.lock()
++            && let Some(r) = slot.take()
++        {
++            r.reply(Err("Native license worker queue is saturated.".to_owned()));
++        }
++    });
++
++    host.handle("r3.readClerkClientToken", move |call| {
++        let raw_url = call
++            .data()
++            .get("url")
++            .and_then(Value::as_str)
++            .unwrap_or("https://clerk.t3.codes/");
++        let url = if raw_url == "https://clerk.t3.codes" || raw_url == "https://clerk.t3.codes/" {
++            "https://clerk.t3.codes/".to_owned()
++        } else {
++            call.reject("r3.readClerkClientToken only permits the T3 Connect Clerk origin.");
++            return;
++        };
++        let Some(reply) = call.into_reply() else {
++            return;
++        };
++        ui.invoke(move || {
++            crate::native::read_clerk_client_cookie(&url, move |token| {
++                reply.reply(Ok(token.map_or(Value::Null, Value::String)));
++            });
++        });
++    });
++}
++
++fn resolve_secure_dir(options: &AppOptions) -> Option<PathBuf> {
++    let base = options.data_dir.clone().or_else(|| {
++        nsh_engine::support_dir()
++            .map(|dir| dir.join(nsh_engine::app_dir_name(Some(&options.app_id))))
++    })?;
++    Some(base.join("secure"))
++}
++
++fn parse_account(data: &Value) -> Result<(String, String), String> {
++    let service = data
++        .get("service")
++        .and_then(Value::as_str)
++        .filter(|s| !s.is_empty())
++        .ok_or_else(|| "secureStorage requires a non-empty service".to_owned())?;
++    let account = data
++        .get("account")
++        .and_then(Value::as_str)
++        .filter(|s| !s.is_empty())
++        .ok_or_else(|| "secureStorage requires a non-empty account".to_owned())?;
++    Ok((service.to_owned(), account.to_owned()))
++}
++
++fn item_entropy(service: &str, account: &str) -> Vec<u8> {
++    let mut bytes = Vec::with_capacity(service.len() + account.len() + 1);
++    bytes.extend_from_slice(service.as_bytes());
++    bytes.push(0);
++    bytes.extend_from_slice(account.as_bytes());
++    bytes
++}
++
++fn item_path(root: &Path, service: &str, account: &str) -> PathBuf {
++    let mut h1: u64 = 0xcbf29ce484222325;
++    let mut h2: u64 = 0x84222325cbf29ce4;
++    for &b in &item_entropy(service, account) {
++        h1 ^= u64::from(b);
++        h1 = h1.wrapping_mul(0x100000001b3);
++        h2 = h2.wrapping_mul(0x100000001b3);
++        h2 ^= u64::from(b);
++    }
++    root.join(format!("{h1:016x}{h2:016x}.dpapi"))
++}
++
++fn dpapi_protect(plain: &[u8], entropy: &[u8]) -> Result<Vec<u8>, String> {
++    let input = CRYPT_INTEGER_BLOB {
++        cbData: u32::try_from(plain.len()).map_err(|_| "secret exceeds DPAPI size limit".to_owned())?,
++        pbData: plain.as_ptr() as *mut u8,
++    };
++    let ent = CRYPT_INTEGER_BLOB {
++        cbData: u32::try_from(entropy.len()).map_err(|_| "entropy exceeds DPAPI size limit".to_owned())?,
++        pbData: entropy.as_ptr() as *mut u8,
++    };
++    let mut output = CRYPT_INTEGER_BLOB::default();
++    // SAFETY: input and entropy blobs point to live slices for the call duration;
++    // output.pbData is allocated by DPAPI and freed with LocalFree below.
++    unsafe {
++        CryptProtectData(
++            &input,
++            PCWSTR::null(),
++            Some(&ent),
++            None,
++            None,
++            CRYPTPROTECT_UI_FORBIDDEN,
++            &mut output,
++        )
++        .map_err(|e| format!("DPAPI encrypt failed: {e}"))?;
++        let encrypted = if output.cbData == 0 || output.pbData.is_null() {
++            Vec::new()
++        } else {
++            std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec()
++        };
++        if !output.pbData.is_null() {
++            let _ = LocalFree(Some(HLOCAL(output.pbData.cast())));
++        }
++        Ok(encrypted)
++    }
++}
++
++fn dpapi_unprotect(cipher: &[u8], entropy: &[u8]) -> Result<Vec<u8>, String> {
++    let input = CRYPT_INTEGER_BLOB {
++        cbData: u32::try_from(cipher.len()).map_err(|_| "ciphertext exceeds DPAPI size limit".to_owned())?,
++        pbData: cipher.as_ptr() as *mut u8,
++    };
++    let ent = CRYPT_INTEGER_BLOB {
++        cbData: u32::try_from(entropy.len()).map_err(|_| "entropy exceeds DPAPI size limit".to_owned())?,
++        pbData: entropy.as_ptr() as *mut u8,
++    };
++    let mut output = CRYPT_INTEGER_BLOB::default();
++    // SAFETY: input and entropy blobs point to live slices for the call duration;
++    // output.pbData is allocated by DPAPI and freed with LocalFree below.
++    unsafe {
++        CryptUnprotectData(
++            &input,
++            None,
++            Some(&ent),
++            None,
++            None,
++            CRYPTPROTECT_UI_FORBIDDEN,
++            &mut output,
++        )
++        .map_err(|e| format!("DPAPI decrypt failed: {e}"))?;
++        let plain = if output.cbData == 0 || output.pbData.is_null() {
++            Vec::new()
++        } else {
++            std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec()
++        };
++        if !output.pbData.is_null() {
++            let _ = LocalFree(Some(HLOCAL(output.pbData.cast())));
++        }
++        Ok(plain)
++    }
++}
++
++fn dpapi_get(root: &Path, service: &str, account: &str) -> Result<Option<String>, String> {
++    let path = item_path(root, service, account);
++    let cipher = match fs::read(&path) {
++        Ok(bytes) => bytes,
++        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
++        Err(err) => return Err(format!("secure storage read failed: {err}")),
++    };
++    let entropy = item_entropy(service, account);
++    let plain = dpapi_unprotect(&cipher, &entropy)?;
++    String::from_utf8(plain)
++        .map(Some)
++        .map_err(|err| format!("secure storage value is not valid UTF-8: {err}"))
++}
++
++fn dpapi_set(root: &Path, service: &str, account: &str, value: &str) -> Result<(), String> {
++    fs::create_dir_all(root).map_err(|err| format!("secure storage mkdir failed: {err}"))?;
++    let entropy = item_entropy(service, account);
++    let cipher = dpapi_protect(value.as_bytes(), &entropy)?;
++    let path = item_path(root, service, account);
++    let seq = DPAPI_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
++    let tmp = path.with_extension(format!("dpapi.{}.{seq}.tmp", std::process::id()));
++    fs::write(&tmp, &cipher).map_err(|err| format!("secure storage write failed: {err}"))?;
++    if let Err(err) = fs::rename(&tmp, &path) {
++        let _ = fs::remove_file(&tmp);
++        return Err(format!("secure storage rename failed: {err}"));
++    }
++    Ok(())
++}
++
++fn dpapi_remove(root: &Path, service: &str, account: &str) -> Result<(), String> {
++    let path = item_path(root, service, account);
++    match fs::remove_file(&path) {
++        Ok(()) => Ok(()),
++        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
++        Err(err) => Err(format!("secure storage remove failed: {err}")),
++    }
++}
++
++fn set_initial_folder(dialog: &IFileOpenDialog, initial: Option<&str>) {
++    let Some(dir) = initial.filter(|s| !s.is_empty()) else {
++        return;
++    };
++    // SAFETY: COM is initialized on the dialog thread and HSTRING stays alive across the call.
++    unsafe {
++        if let Ok(folder) = SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(dir), None) {
++            let _ = dialog.SetFolder(&folder);
++        }
++    }
++}
++
++fn pick_folder(owner: HWND, initial: Option<&str>) -> Result<Option<String>, String> {
++    // SAFETY: COM apartment initialized and uninitialized on this dedicated thread.
++    unsafe {
++        CoInitializeEx(None, COINIT_APARTMENTTHREADED)
++            .ok()
++            .map_err(|e| format!("COM init failed: {e}"))?;
++        let result = (|| -> windows::core::Result<Option<String>> {
++            let dialog: IFileOpenDialog =
++                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
++            let options = dialog.GetOptions()? | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM;
++            dialog.SetOptions(options)?;
++            set_initial_folder(&dialog, initial);
++            if dialog.Show(Some(owner)).is_err() {
++                return Ok(None);
++            }
++            let item = dialog.GetResult()?;
++            let name = item.GetDisplayName(SIGDN_FILESYSPATH)?;
++            let text = name.to_string().ok();
++            CoTaskMemFree(Some(name.0 as *const c_void));
++            Ok(text)
++        })();
++        CoUninitialize();
++        result.map_err(|e| format!("Folder dialog failed: {e}"))
++    }
++}
++
++fn pick_files(
++    owner: HWND,
++    images_only: bool,
++    multiple: bool,
++    initial: Option<&str>,
++) -> Result<Vec<String>, String> {
++    // SAFETY: COM apartment initialized and uninitialized on this dedicated thread.
++    unsafe {
++        CoInitializeEx(None, COINIT_APARTMENTTHREADED)
++            .ok()
++            .map_err(|e| format!("COM init failed: {e}"))?;
++        let result = (|| -> windows::core::Result<Vec<String>> {
++            let dialog: IFileOpenDialog =
++                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
++            let mut options = dialog.GetOptions()? | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM;
++            if multiple {
++                options |= FOS_ALLOWMULTISELECT;
++            }
++            dialog.SetOptions(options)?;
++            if images_only {
++                let label = HSTRING::from("Images");
++                let pattern = HSTRING::from("*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp;*.ico;*.svg");
++                let spec = [COMDLG_FILTERSPEC {
++                    pszName: PCWSTR(label.as_ptr()),
++                    pszSpec: PCWSTR(pattern.as_ptr()),
++                }];
++                dialog.SetFileTypes(&spec)?;
++            }
++            set_initial_folder(&dialog, initial);
++            if dialog.Show(Some(owner)).is_err() {
++                return Ok(Vec::new());
++            }
++            let items = dialog.GetResults()?;
++            let mut paths = Vec::new();
++            for i in 0..items.GetCount()? {
++                let item = items.GetItemAt(i)?;
++                let name = item.GetDisplayName(SIGDN_FILESYSPATH)?;
++                if let Ok(text) = name.to_string() {
++                    paths.push(text);
++                }
++                CoTaskMemFree(Some(name.0 as *const c_void));
++            }
++            Ok(paths)
++        })();
++        CoUninitialize();
++        result.map_err(|e| format!("File dialog failed: {e}"))
++    }
++}
+diff --git a/crates/nsh-platform-windows/src/text_input.rs b/crates/nsh-platform-windows/src/text_input.rs
+index 3c05b2c..1eef2c9 100644
+--- a/crates/nsh-platform-windows/src/text_input.rs
++++ b/crates/nsh-platform-windows/src/text_input.rs
+@@ -1472,6 +1472,7 @@ pub(crate) fn removed(surface: &Surface, view: &NshView) {
+     {
+         drop_quietly(surface, &field);
+         crate::input::set_state(surface, &field, state::FOCUSED, false);
++        send(surface, &field, EventKind::Blur, || EventPayload::None);
+     }
+ }
+ 
+diff --git a/crates/nsh-platform-windows/src/window.rs b/crates/nsh-platform-windows/src/window.rs
+index 2f4d98b..224b4ad 100644
+--- a/crates/nsh-platform-windows/src/window.rs
++++ b/crates/nsh-platform-windows/src/window.rs
+@@ -1429,6 +1429,11 @@ fn handle(
+         }
+         WM_ERASEBKGND => return Some(LRESULT(1)),
+         WM_SIZE => {
++            if wparam.0 == SIZE_MINIMIZED as usize {
++                sync_size(surface, hwnd);
++                crate::gfx::trim();
++                return None;
++            }
+             // Filled first: the frame below waits for the layout, and DWM
+             // shows the window's redirection surface past the last frame
+             // meanwhile, black unless filled (DWM never shows a window swap
+@@ -1678,7 +1683,13 @@ fn handle(
+                 crate::window_state::displays_changed(surface);
+             }
+         }
+-        WM_ACTIVATEAPP => crate::system::app_activated(surface, wparam.0 != 0),
++        WM_ACTIVATEAPP => {
++            let active = wparam.0 != 0;
++            crate::system::app_activated(surface, active);
++            if !active {
++                crate::gfx::trim();
++            }
++        }
+         // Shown, hidden, minimized or restored (before default handling
+         // sends `WM_SIZE`).
+         WM_WINDOWPOSCHANGED if data.top_level => {

@@ -3,6 +3,7 @@
 // `platform()`/`arch()` (Rust's spellings: "macos"/"aarch64") but no OS release string, so that one field is
 // sampled through `sw_vers` the same way hostTelemetry.ts samples `pmset`/`ioreg` — granted in nsh.json's
 // `process.execute` allowlist, run through desktop/runtime.ts so tests never shell out for real.
+import { platform } from "nsh";
 import { arch } from "os";
 import { desktop } from "./runtime";
 
@@ -46,5 +47,5 @@ export async function sampleHostIdentity(): Promise<HostIdentity> {
  * no Electron/Chromium/V8, so there is no renderer-process version triad to port. GPUI draws the app's own UI
  * natively; WKWebView is used only inside the in-app browser previews (components/rightPanel/surfaces.tsx,
  * previewMore.tsx), never for the app's own chrome. */
-export const GPUI_BACKEND_LABEL = "GPUI (native)";
-export const WEBVIEW_ENGINE_LABEL = "WKWebView (WebKit, previews only)";
+export const GPUI_BACKEND_LABEL = platform.os === "windows" ? "Win32 + Direct2D (native)" : "GPUI (native)";
+export const WEBVIEW_ENGINE_LABEL = platform.os === "windows" ? "WebView2 (Edge, previews & terminals)" : "WKWebView (WebKit, previews only)";

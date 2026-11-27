@@ -30,13 +30,14 @@ export interface InlineContext {
 
 export type InlineChipName = "filelink" | "threadlink" | "citation" | "skill" | "model" | "weblink" | "inlinecode";
 
-export interface FileChipData { meta: MarkdownFileLinkMeta; href: string; label: string; copyMarkdown: string; inlineCode: boolean }
+export interface TableColumnBounds { minPx: number; totalMinPx: number }
+export interface FileChipData { meta: MarkdownFileLinkMeta; href: string; label: string; copyMarkdown: string; inlineCode: boolean; tableColumn?: TableColumnBounds }
 export interface InlineCodeData { code: string }
-export interface ThreadChipData { threadId: string; environmentId: string | null; label: string | null }
-export interface CitationChipData { citation: AssistantCitation }
-export interface SkillChipData { skill: InlineSkill; raw: string }
-export interface ModelChipData { presentation: ModelMentionPresentation; source: string }
-export interface WebChipData { url: string; host: string; label: string }
+export interface ThreadChipData { threadId: string; environmentId: string | null; label: string | null; tableColumn?: TableColumnBounds }
+export interface CitationChipData { citation: AssistantCitation; tableColumn?: TableColumnBounds }
+export interface SkillChipData { skill: InlineSkill; raw: string; tableColumn?: TableColumnBounds }
+export interface ModelChipData { presentation: ModelMentionPresentation; source: string; tableColumn?: TableColumnBounds }
+export interface WebChipData { url: string; host: string; label: string; tableColumn?: TableColumnBounds }
 
 /** Longest link text a web link chip carries: a chip stays on one line, so a longer link keeps wrapping as text. */
 export const WEB_CHIP_MAX_LABEL = 48;
@@ -83,15 +84,21 @@ export function matchInlineSkills(text: string, skills: readonly InlineSkill[]):
 export const skillDisplayName = (skill: Pick<InlineSkill, "name" | "displayName">): string => skill.displayName?.trim() || skill.name;
 
 /** SkillInlineText: the `$skill` and `model:<instance>/<model>` references of a text, in order, the earlier one winning an overlap. */
-function splitSkills(text: string, skills: readonly InlineSkill[], models: InlineContext["models"]): TextViewInline[] | null {
+function splitSkills(
+  text: string,
+  skills: readonly InlineSkill[],
+  models: InlineContext["models"],
+  tableColumn?: TableColumnBounds,
+): TextViewInline[] | null {
   const chips: { start: number; end: number; node: TextViewInline }[] = [];
+  const column = tableColumn ? { tableColumn } : {};
   if (skills.length > 0 && text.includes("$")) {
-    for (const match of matchInlineSkills(text, skills)) chips.push({ start: match.start, end: match.end, node: custom<SkillChipData>("skill", match.raw, { skill: match.skill, raw: match.raw }) });
+    for (const match of matchInlineSkills(text, skills)) chips.push({ start: match.start, end: match.end, node: custom<SkillChipData>("skill", match.raw, { skill: match.skill, raw: match.raw, ...column }) });
   }
   if (models) {
     for (const mention of collectComposerModelMentions(text)) {
       const presentation = models(mention.instanceId, mention.model);
-      if (presentation) chips.push({ start: mention.start, end: mention.end, node: custom<ModelChipData>("model", mention.source, { presentation, source: mention.source }) });
+      if (presentation) chips.push({ start: mention.start, end: mention.end, node: custom<ModelChipData>("model", mention.source, { presentation, source: mention.source, ...column }) });
     }
   }
   if (chips.length === 0) return null;
@@ -124,52 +131,110 @@ export function externalWebLinkHost(href: string | null | undefined): string | n
 
 interface Walk { context: InlineContext; files: MarkdownFileLinkMeta[] }
 
-function fileChipFor(href: string, label: string, walk: Walk): TextViewInline | null {
+function tableLineWidthEm(line: string): number {
+  let width = 0;
+  for (const ch of line) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code === 0x20) width += 0.3;
+    else if (
+      (code >= 0x1100 && code <= 0x115f) ||
+      (code >= 0x2e80 && code <= 0xa4cf) ||
+      (code >= 0xac00 && code <= 0xd7a3) ||
+      (code >= 0xf900 && code <= 0xfaff) ||
+      (code >= 0xfe30 && code <= 0xfe4f) ||
+      (code >= 0xff00 && code <= 0xff60) ||
+      (code >= 0xffe0 && code <= 0xffe6) ||
+      (code >= 0x1f300 && code <= 0x1faff) ||
+      (code >= 0x20000 && code <= 0x3fffd)
+    ) width += 1.0;
+    else width += 0.6;
+  }
+  return width;
+}
+
+export function tableColumnWidths(block: Extract<TextViewBlock, { type: "table" }>): TableColumnBounds[] {
+  const rows = [block.head, ...(block.rows ?? [])];
+  const cellSpan = (cell: { colspan?: number }) => Math.max(1, cell.colspan ?? 1);
+  const contentWidths: number[] = [];
+  for (const row of rows) {
+    let col = 0;
+    for (const cell of row) {
+      const span = cellSpan(cell);
+      while (contentWidths.length < col + span) contentWidths.push(0);
+      if (span === 1) {
+        let cellMax = contentWidths[col]!;
+        for (const line of inlinePlainText(cell.content).split("\n")) cellMax = Math.max(cellMax, tableLineWidthEm(line));
+        contentWidths[col] = cellMax;
+      }
+      col += span;
+    }
+  }
+  const floors = contentWidths.map((content) => Math.min(content + 2, Math.max(10, Math.min(30, content / 2))) * 16);
+  const totalMinPx = floors.reduce((sum, width) => sum + width, 0);
+  return floors.map((minPx) => ({ minPx, totalMinPx }));
+}
+
+export function tableCellLabelMaxWidth(bounds: TableColumnBounds, availableBlockWidth: number): number {
+  const colPx = bounds.totalMinPx >= availableBlockWidth || bounds.totalMinPx <= 0
+    ? bounds.minPx
+    : Math.max(bounds.minPx, (bounds.minPx / bounds.totalMinPx) * availableBlockWidth);
+  return Math.max(64, Math.min(288, Math.floor(colPx) - 42));
+}
+
+function fileChipFor(href: string, label: string, walk: Walk, tableColumn?: TableColumnBounds): TextViewInline | null {
   const meta = resolveMarkdownFileLinkMeta(normalizeMarkdownLinkDestination(href), walk.context.cwd);
   if (!meta) return null;
   walk.files.push(meta);
-  return custom<FileChipData>("filelink", label, { meta, href: normalizeMarkdownLinkDestination(href), label: "", copyMarkdown: "", inlineCode: false });
+  return custom<FileChipData>("filelink", label, {
+    meta,
+    href: normalizeMarkdownLinkDestination(href),
+    label: "",
+    copyMarkdown: "",
+    inlineCode: false,
+    ...(tableColumn ? { tableColumn } : {}),
+  });
 }
 
-function transformLink(node: Extract<TextViewInline, { type: "link" }>, walk: Walk): TextViewInline[] {
+function transformLink(node: Extract<TextViewInline, { type: "link" }>, walk: Walk, tableColumn?: TableColumnBounds): TextViewInline[] {
   const url = node.url;
   const written = inlinePlainText(node.content);
+  const column = tableColumn ? { tableColumn } : {};
   const citation = parseAssistantCitationHref(url);
-  if (citation) return [custom<CitationChipData>("citation", written, { citation })];
+  if (citation) return [custom<CitationChipData>("citation", written, { citation, ...column })];
   const thread = parseThreadHref(url);
   if (thread) {
     // An autolink's text is its own URL, which is no label.
     const label = written && parseThreadHref(written) === null ? written : null;
-    return [custom<ThreadChipData>("threadlink", label ?? "", { threadId: thread.threadId, environmentId: thread.environmentId, label })];
+    return [custom<ThreadChipData>("threadlink", label ?? "", { threadId: thread.threadId, environmentId: thread.environmentId, label, ...column })];
   }
   if (url.startsWith("t3-context://")) return [node];
   if (walk.context.cwd) {
-    const chip = fileChipFor(url, written, walk);
+    const chip = fileChipFor(url, written, walk, tableColumn);
     if (chip) {
       const standalone = isMarkdownFileLinkLabel(written, url);
       const copyMarkdown = `[${(written || (chip as { data: FileChipData }).data.meta.basename).replace(/[\\[\]]/g, "\\$&")}](${normalizeMarkdownLinkDestination(url)})`;
       (chip as { data: FileChipData }).data.copyMarkdown = copyMarkdown;
-      return standalone ? [chip] : [...node.content.map((child) => transformInline(child, walk)).flat(), { type: "text", text: " " }, chip];
+      return standalone ? [chip] : [...node.content.map((child) => transformInline(child, walk, false, tableColumn)).flat(), { type: "text", text: " " }, chip];
     }
   }
   const host = externalWebLinkHost(url);
   if (walk.context.webLinkChips && host !== null && written.length > 0 && written.length <= WEB_CHIP_MAX_LABEL && node.content.every((child) => child.type === "text")) {
-    return [custom<WebChipData>("weblink", written, { url, host, label: written })];
+    return [custom<WebChipData>("weblink", written, { url, host, label: written, ...column })];
   }
-  return [{ ...node, content: node.content.flatMap((child) => transformInline(child, walk, true)) }];
+  return [{ ...node, content: node.content.flatMap((child) => transformInline(child, walk, true, tableColumn)) }];
 }
 
-function transformInline(node: TextViewInline, walk: Walk, insideLink = false): TextViewInline[] {
+function transformInline(node: TextViewInline, walk: Walk, insideLink = false, tableColumn?: TableColumnBounds): TextViewInline[] {
   switch (node.type) {
     case "link":
-      return insideLink ? [node] : transformLink(node, walk);
+      return insideLink ? [node] : transformLink(node, walk, tableColumn);
     case "code": {
       if (insideLink) return [node];
       if (walk.context.cwd) {
         const meta = resolveInlineCodeFileLinkMeta(node.code, walk.context.cwd);
         if (meta) {
           walk.files.push(meta);
-          return [custom<FileChipData>("filelink", node.code, { meta, href: "", label: "", copyMarkdown: `\`${node.code}\``, inlineCode: true })];
+          return [custom<FileChipData>("filelink", node.code, { meta, href: "", label: "", copyMarkdown: `\`${node.code}\``, inlineCode: true, ...(tableColumn ? { tableColumn } : {}) })];
         }
       }
       // TextView's native "code" node is a styled text run, so Tailwind padding/border/background
@@ -178,12 +243,25 @@ function transformInline(node: TextViewInline, walk: Walk, insideLink = false): 
       return [custom<InlineCodeData>("inlinecode", node.code, { code: node.code })];
     }
     case "text":
-      return (!insideLink && splitSkills(node.text, walk.context.skills, walk.context.models)) || [node];
+      return (!insideLink && splitSkills(node.text, walk.context.skills, walk.context.models, tableColumn)) || [node];
     case "strong": case "emphasis": case "strikethrough": case "underline": case "superscript": case "subscript": case "small": case "highlight":
-      return [{ ...node, content: node.content.flatMap((child) => transformInline(child, walk, insideLink)) } as TextViewInline];
+      return [{ ...node, content: node.content.flatMap((child) => transformInline(child, walk, insideLink, tableColumn)) } as TextViewInline];
     default:
       return [node];
   }
+}
+
+function transformTableRow<T extends { content: TextViewInline[]; colspan?: number }>(row: T[], columns: TableColumnBounds[], walk: Walk): T[] {
+  let col = 0;
+  return row.map((cell) => {
+    const span = Math.max(1, cell.colspan ?? 1);
+    const spanned = columns.slice(col, col + span);
+    const bounds: TableColumnBounds | undefined = spanned.length > 0
+      ? { minPx: spanned.reduce((sum, entry) => sum + entry.minPx, 0), totalMinPx: spanned[0]!.totalMinPx }
+      : undefined;
+    col += span;
+    return { ...cell, content: cell.content.flatMap((node) => transformInline(node, walk, false, bounds)) };
+  });
 }
 
 function transformBlock(block: TextViewBlock, walk: Walk): TextViewBlock {
@@ -194,12 +272,14 @@ function transformBlock(block: TextViewBlock, walk: Walk): TextViewBlock {
       return { ...block, children: block.children.map((child) => transformBlock(child, walk)) };
     case "list":
       return { ...block, items: block.items.map((item): TextViewListItem => ({ ...item, children: item.children.map((child) => transformBlock(child, walk)) })) };
-    case "table":
+    case "table": {
+      const columns = tableColumnWidths(block);
       return {
         ...block,
-        head: block.head.map((cell) => ({ ...cell, content: cell.content.flatMap((node) => transformInline(node, walk)) })),
-        rows: block.rows?.map((row) => row.map((cell) => ({ ...cell, content: cell.content.flatMap((node) => transformInline(node, walk)) }))),
+        head: transformTableRow(block.head, columns, walk),
+        rows: block.rows?.map((row) => transformTableRow(row, columns, walk)),
       };
+    }
     case "details":
       return { ...block, summary: block.summary.flatMap((node) => transformInline(node, walk)), children: block.children.map((child) => transformBlock(child, walk)) };
     default:

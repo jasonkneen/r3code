@@ -1,6 +1,7 @@
 import { motions } from "nsh";
 import { expect, open, test } from "nsh/test";
-import { cssEasing, EASE_DRAWER, EASE_OUT, railIndicatorMove, revealIn, departures, mergeLeaving, panelMotionActive, rowsEnter, STASH_PULSE_HOLD_MS, toastStackExpand, trackArrivals, statusPulse } from "./motionTokens";
+import { isWindowsLoopPaused, specStartValues } from "./Motion";
+import { backdropEnter, cssEasing, EASE_DRAWER, EASE_OUT, railIndicatorMove, revealIn, routeModalEnter, departures, mergeLeaving, panelMotionActive, rowsEnter, STASH_PULSE_HOLD_MS, toastStackExpand, trackArrivals, statusPulse } from "./motionTokens";
 
 const options = { width: 240, height: 160, platform: "macos" as const, clock: {} };
 
@@ -110,4 +111,23 @@ test("a provider pill whose key changes plays its exit before the next view show
   await app.press("text:Clear");
   await app.waitFor("text:View B (leaving)");
   await app.waitFor("text:nothing");
+});
+
+test("specStartValues extracts initial channel values from channel-map and frame-array specs", () => {
+  expect(specStartValues(backdropEnter)).toEqual({ opacity: 0 });
+  expect(specStartValues(routeModalEnter)).toEqual({ opacity: 0, scale: 0.985 });
+  expect(specStartValues(toastStackExpand(2, 120))).toEqual({ translateY: -96, scale: 0.8, opacity: 0 });
+  expect(specStartValues(statusPulse)).toEqual({ opacity: 1 });
+});
+
+test("isWindowsLoopPaused pauses infinite loops only on inactive/background Windows declarative windows", () => {
+  let reads = 0;
+  const read = (state: string) => () => { reads += 1; return state; };
+  expect(isWindowsLoopPaused("windows", true, read("inactive"))).toBe(true);
+  expect(isWindowsLoopPaused("windows", true, read("background"))).toBe(true);
+  expect(isWindowsLoopPaused("windows", true, read("active"))).toBe(false);
+  expect(reads).toBe(3);
+  expect(isWindowsLoopPaused("windows", false, read("inactive"))).toBe(false);
+  expect(isWindowsLoopPaused("macos", true, read("inactive"))).toBe(false);
+  expect(reads).toBe(3);
 });

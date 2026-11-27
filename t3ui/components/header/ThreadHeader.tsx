@@ -181,7 +181,7 @@ export function ThreadHeader(props: ThreadHeaderProps = {}) {
   };
 
   return (
-    <View ref={(node) => headerNode.set(node)} class="relative h-[52px] shrink-0 flex-row items-center gap-3 bg-background" style={{ paddingLeft: sidebarOpen() ? 20 : titleBar().left + 20, paddingRight: 13, paddingTop: 2 }} desktop={{ windowDrag: true }} testID="Thread header">
+    <View ref={(node) => headerNode.set(node)} class="relative h-[52px] shrink-0 flex-row items-center gap-3 bg-background" style={{ paddingLeft: sidebarOpen() ? 20 : titleBar().left + 20, paddingRight: (panelOpen() ? 0 : titleBar().right) + 13, paddingTop: 2 }} desktop={{ windowDrag: true }} testID="Thread header">
       {/* With the sidebar collapsed its own toggle is gone, so the header carries one (the web's SidebarTrigger). */}
       {sidebarOpen() ? null : (
         <View ref={sidebarTrigger.ref} accessibilityLabel="Toggle main sidebar" role="button" desktop={{ windowDrag: false }} onPress={toggleSidebar} class="size-7 shrink-0 items-center justify-center rounded-lg hover:bg-accent active:scale-[0.97] transition-transform duration-150 ease-in-out">

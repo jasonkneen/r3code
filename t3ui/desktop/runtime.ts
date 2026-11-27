@@ -4,6 +4,7 @@
 // command (a real screencapture would capture the owner's screen or raise a macOS permission prompt).
 import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "fs/promises";
 import { openUrl, platform, Storage } from "nsh";
+import { homedir } from "os";
 import process from "process";
 
 export interface RunResult { code?: number | null; signal?: string | null; stdout: string; stderr: string }
@@ -88,7 +89,10 @@ const realRuntime: DesktopRuntime = {
   setItem: (key, value) => Storage.setItem(key, value),
   os: () => platform.os,
   dataDir: () => process.dataDir,
-  homeDir: () => process.env.HOME ?? null,
+  homeDir: () => {
+    try { return homedir(); }
+    catch { return process.env.HOME ?? process.env.USERPROFILE ?? null; }
+  },
   randomId: () => crypto.randomUUID(),
   now: () => new Date(),
 };

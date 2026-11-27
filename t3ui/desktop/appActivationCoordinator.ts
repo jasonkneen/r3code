@@ -3,6 +3,7 @@
 // file-drop listener in appActivation.ts rather than the reference's IPC channel. Started once, from
 // installCoordinators.ts, alongside webLinks and windowBounds.
 import { exists, mkdir, readdir, readFile, rename, unlink, writeFile } from "fs/promises";
+import { homedir } from "os";
 import process from "process";
 import { activationDirectoryFor } from "./cliCommand";
 import { revealWindow } from "./desktopHost";
@@ -54,7 +55,8 @@ let listener: ActivationListener | null = null;
 /** Starts polling `~/.t3codegpui/activation` once, idempotently. No-op where `process.env.HOME` is unavailable. */
 export function installAppActivationListener(): void {
   if (listener) return;
-  const home = process.env.HOME;
+  let home: string | null = null;
+  try { home = homedir(); } catch { home = process.env.HOME ?? process.env.USERPROFILE ?? null; }
   if (!home) return;
   listener = startActivationListener({
     dir: activationDirectoryFor(home),

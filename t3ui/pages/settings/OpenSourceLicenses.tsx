@@ -1,7 +1,7 @@
 // The Open source licenses page, ported from components/settings/OpenSourceLicenses.tsx: the server's
 // third-party notice manifest, one collapsible entry per notice with its license text and a link to
 // the project, searchable by every word, with the web's loading, empty and failure states.
-import { effect, openUrl, signal, Text, token, untracked, View } from "nsh";
+import { effect, host, openUrl, platform, signal, Text, token, untracked, View } from "nsh";
 import { Input } from "nsh/base";
 import { Icon } from "../../components/Icons";
 import { tokenAlpha } from "../../components/composer/tokenColor";
@@ -39,6 +39,65 @@ const PYTHON_NOTICE: ThirdPartyLicenseEntry = {
   name: "CPython", version: "3.11.18", license: "Python-2.0", kind: "custom", bundles: ["theme helper"],
   sourceUrl: "https://github.com/python/cpython", noticeText: PYTHON_LICENSE_TEXT,
 };
+
+export interface NativeLicensePayload {
+  texts: string[];
+  packages: { name: string; version: string; license: string; sourceUrl: string | null; texts: number[] }[];
+  external?: boolean;
+  packageCount?: number;
+}
+
+const bundledNativeData = nativeLicenseData as NativeLicensePayload;
+let nativeLicenseLoaderOverride: (() => Promise<NativeLicensePayload>) | null = null;
+export function configureNativeLicenseLoader(next: (() => Promise<NativeLicensePayload>) | null) {
+  nativeLicenseLoaderOverride = next;
+}
+
+function toNativeEntries(data: NativeLicensePayload): ThirdPartyLicenseEntry[] {
+  if (!data || typeof data !== "object" || !Array.isArray(data.texts) || !Array.isArray(data.packages)) {
+    throw new Error("Native dependency notices have an invalid format.");
+  }
+  return data.packages.map((item) => {
+    if (
+      !item
+      || typeof item !== "object"
+      || typeof item.name !== "string"
+      || typeof item.version !== "string"
+      || typeof item.license !== "string"
+      || (item.sourceUrl !== null && typeof item.sourceUrl !== "string")
+      || !Array.isArray(item.texts)
+    ) {
+      throw new Error("Native dependency notices contain a malformed package entry.");
+    }
+    const noticeParts = item.texts.map((index) => {
+      if (typeof index !== "number" || !Number.isInteger(index) || index < 0 || index >= data.texts.length || typeof data.texts[index] !== "string") {
+        throw new Error("Native dependency notices contain an invalid text reference.");
+      }
+      return data.texts[index]!;
+    });
+    return {
+      name: item.name,
+      version: item.version,
+      license: item.license,
+      kind: "package",
+      bundles: ["native host"],
+      sourceUrl: item.sourceUrl,
+      noticeText: noticeParts.join("\n\n"),
+    };
+  });
+}
+
+async function fetchExternalNativeLicenses(): Promise<NativeLicensePayload> {
+  if (nativeLicenseLoaderOverride) return nativeLicenseLoaderOverride();
+  if (platform.os === "windows" && host.available()) {
+    const raw = await host.call("r3.readNativeLicenses", {}, { timeout: 5000 });
+    if (raw && typeof raw === "object" && Array.isArray((raw as NativeLicensePayload).texts) && Array.isArray((raw as NativeLicensePayload).packages)) {
+      return raw as NativeLicensePayload;
+    }
+    throw new Error("Native dependency notices have an invalid format.");
+  }
+  throw new Error("Native dependency notices are unavailable.");
+}
 
 /** Tests replace the transport; the app loads from the connected server. */
 let loader: () => Promise<ThirdPartyLicenseManifest> = () => {
@@ -95,16 +154,41 @@ export function OpenSourceLicenses() {
   const nativeOpen = signal(false);
   const nativeQuery = signal("");
   const nativeLimit = signal(40);
-  let cachedNativeEntries: ThirdPartyLicenseEntry[] | null = null;
+  const nativeExternal = Boolean(bundledNativeData.external) || nativeLicenseLoaderOverride !== null;
+  const nativeTotalCount = signal(
+    typeof bundledNativeData.packageCount === "number" ? bundledNativeData.packageCount : bundledNativeData.packages.length,
+  );
+  const loadedNativeEntries = signal<ThirdPartyLicenseEntry[] | null>(null);
+  const nativeLoading = signal(false);
+  const nativeError = signal<string | null>(null);
+  let nativeSerial = 0;
+  const loadNative = () => {
+    if (!nativeExternal || loadedNativeEntries() !== null || nativeLoading()) return;
+    const mine = ++nativeSerial;
+    nativeLoading.set(true);
+    nativeError.set(null);
+    void fetchExternalNativeLicenses()
+      .then((data) => {
+        if (mine !== nativeSerial) return;
+        const entries = toNativeEntries(data);
+        loadedNativeEntries.set(entries);
+        nativeTotalCount.set(entries.length);
+        nativeLoading.set(false);
+      })
+      .catch((cause) => {
+        if (mine !== nativeSerial) return;
+        nativeLoading.set(false);
+        nativeError.set(cause instanceof Error && cause.message ? cause.message : "Could not load native dependency notices.");
+      });
+  };
+  let cachedBundledNativeEntries: ThirdPartyLicenseEntry[] | null = null;
   const nativeEntries = () => {
     if (!nativeOpen()) return [];
-    if (!cachedNativeEntries) {
-      cachedNativeEntries = nativeLicenseData.packages.map((item) => ({
-        name: item.name, version: item.version, license: item.license, kind: "package", bundles: ["native host"],
-        sourceUrl: item.sourceUrl, noticeText: item.texts.map((index) => nativeLicenseData.texts[index] ?? "").join("\n\n"),
-      }));
+    if (nativeExternal) return loadedNativeEntries() ?? [];
+    if (!cachedBundledNativeEntries) {
+      cachedBundledNativeEntries = toNativeEntries(bundledNativeData);
     }
-    return cachedNativeEntries;
+    return cachedBundledNativeEntries;
   };
   const matchingNative = () => filterThirdPartyLicenseEntries(nativeEntries(), nativeQuery());
   let serial = 0;
@@ -169,21 +253,37 @@ export function OpenSourceLicenses() {
       <NoticeRow entry={PYTHON_NOTICE} open={() => openKey() === "python-runtime"} toggle={() => openKey.set(openKey() === "python-runtime" ? null : "python-runtime")} />
       <View class="items-start gap-3 px-4 py-4">
         <Text class="text-xs text-muted-foreground">Native dependency notices generated for the macOS Apple silicon host.</Text>
-        <SettingsButton label={nativeOpen() ? "Hide native dependencies" : `View ${nativeLicenseData.packages.length} native dependencies`} onPress={() => nativeOpen.set(!nativeOpen())} />
+        <SettingsButton
+          label={nativeOpen() ? "Hide native dependencies" : `View ${nativeTotalCount()} native dependencies`}
+          onPress={() => {
+            const opening = !nativeOpen();
+            nativeOpen.set(opening);
+            if (opening && nativeExternal) loadNative();
+          }}
+        />
         {nativeOpen() ? (
-          <View class="w-full gap-2">
-            <Input accessibilityLabel="Search native dependencies" value={nativeQuery()} placeholder="Search native dependencies" onChange={(event) => { nativeQuery.set(event.value); nativeLimit.set(40); }} class="h-7 w-full rounded border border-input bg-transparent px-2 text-xs text-foreground" />
-            <Text class="text-xs text-muted-foreground">{licenseCountLabel(matchingNative().length, nativeEntries().length)}</Text>
-            {matchingNative().length ? (
-              <Each of={matchingNative().slice(0, nativeLimit()) as ThirdPartyLicenseEntry[]} key={(entry) => thirdPartyLicenseEntryKey(entry)}>
-                {(entry) => {
-                  const key = `native:${thirdPartyLicenseEntryKey(entry())}`;
-                  return <NoticeRow entry={entry()} open={() => openKey() === key} toggle={() => openKey.set(openKey() === key ? null : key)} />;
-                }}
-              </Each>
-            ) : <Text class="text-xs text-muted-foreground">No native dependencies match that search.</Text>}
-            {matchingNative().length > nativeLimit() ? <SettingsButton label="Show more native dependencies" onPress={() => nativeLimit.set(nativeLimit() + 40)} /> : null}
-          </View>
+          nativeExternal && nativeLoading() ? (
+            <Text class="text-xs text-muted-foreground">Loading native dependencies…</Text>
+          ) : nativeExternal && nativeError() !== null ? (
+            <View class="items-start gap-2">
+              <Text class="text-xs text-muted-foreground">{nativeError()}</Text>
+              <SettingsButton label="Retry native dependencies" onPress={loadNative} />
+            </View>
+          ) : (
+            <View class="w-full gap-2">
+              <Input accessibilityLabel="Search native dependencies" value={nativeQuery()} placeholder="Search native dependencies" onChange={(event) => { nativeQuery.set(event.value); nativeLimit.set(40); }} class="h-7 w-full rounded border border-input bg-transparent px-2 text-xs text-foreground" />
+              <Text class="text-xs text-muted-foreground">{licenseCountLabel(matchingNative().length, nativeEntries().length)}</Text>
+              {matchingNative().length ? (
+                <Each of={matchingNative().slice(0, nativeLimit()) as ThirdPartyLicenseEntry[]} key={(entry) => thirdPartyLicenseEntryKey(entry)}>
+                  {(entry) => {
+                    const key = `native:${thirdPartyLicenseEntryKey(entry())}`;
+                    return <NoticeRow entry={entry()} open={() => openKey() === key} toggle={() => openKey.set(openKey() === key ? null : key)} />;
+                  }}
+                </Each>
+              ) : <Text class="text-xs text-muted-foreground">No native dependencies match that search.</Text>}
+              {matchingNative().length > nativeLimit() ? <SettingsButton label="Show more native dependencies" onPress={() => nativeLimit.set(nativeLimit() + 40)} /> : null}
+            </View>
+          )
         ) : null}
       </View>
     </SettingsSection>

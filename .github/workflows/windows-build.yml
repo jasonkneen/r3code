@@ -1,0 +1,160 @@
+name: Windows Thin Client Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/windows-client
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: windows-client-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: "1"
+      CARGO_PROFILE_RELEASE_LTO: thin
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+    steps:
+      - name: Checkout r3code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run Windows build tool unit tests
+        run: python -m unittest tools/test_build_r3_windows.py
+
+      - name: Restore cached NSH Windows binaries
+        id: nsh-bin-cache
+        uses: actions/cache@v4
+        with:
+          path: build/nsh-windows-bin
+          key: windows-nsh-bins-v0.7.1-thin-${{ hashFiles('third_party/nsh-host-patches/windows-nsh-v0.7.1.patch') }}
+
+      - name: Install Rust stable toolchain
+        if: steps.nsh-bin-cache.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Prepare patched NSH v0.7.1 source
+        if: steps.nsh-bin-cache.outputs.cache-hit != 'true'
+        run: python tools/build_r3_windows.py --prepare-only --nsh-source build/nsh-windows-src
+
+      - name: Cache Cargo dependencies for NSH
+        if: steps.nsh-bin-cache.outputs.cache-hit != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: build/nsh-windows-src -> target
+          key: windows-nsh-v0.7.1-thin-${{ hashFiles('third_party/nsh-host-patches/windows-nsh-v0.7.1.patch') }}
+          cache-on-failure: true
+
+      - name: Build nsh-cli and nsh-windows-app separately
+        if: steps.nsh-bin-cache.outputs.cache-hit != 'true'
+        working-directory: build/nsh-windows-src
+        shell: pwsh
+        run: |
+          cargo build --locked --release -p nsh-cli
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --release -p nsh-windows-app
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Stage compiled NSH binaries for cache
+        if: steps.nsh-bin-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "build/nsh-windows-bin" | Out-Null
+          Copy-Item "build/nsh-windows-src/target/release/nsh.exe" "build/nsh-windows-bin/nsh.exe" -Force
+          Copy-Item "build/nsh-windows-src/target/release/nsh-windows-app.exe" "build/nsh-windows-bin/nsh-windows-app.exe" -Force
+
+      - name: Package portable R3 Code Windows bundle
+        shell: pwsh
+        run: |
+          python tools/build_r3_windows.py `
+            --nsh-bin build/nsh-windows-bin/nsh.exe `
+            --host-exe build/nsh-windows-bin/nsh-windows-app.exe `
+            --stage-dir build/r3-win-stage `
+            --output "build/R3 Code" `
+            --zip "build/R3-Code-windows-x64.zip"
+          Get-Item "build/R3 Code/nsh/bundle.nshc" | Select-Object Name, Length
+
+      - name: Run Windows app startup smoke test
+        shell: pwsh
+        run: |
+          $nsh = (Resolve-Path "build/nsh-windows-bin/nsh.exe").Path
+          Copy-Item "tools/windows_boot_smoke.test.ts" "build/r3-win-stage/windows-boot-smoke.test.ts" -Force
+          & $nsh test build/r3-win-stage/windows-boot-smoke.test.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run affected t3ui unit tests
+        shell: pwsh
+        run: |
+          $nsh = (Resolve-Path "build/nsh-windows-bin/nsh.exe").Path
+          $tests = @(
+            "t3ui/secure-storage.test.ts",
+            "t3ui/environments/ssh.test.ts",
+            "t3ui/environments/sshEnvironment.test.ts",
+            "t3ui/desktop/dialogs.test.ts",
+            "t3ui/desktop/hostInfo.test.ts",
+            "t3ui/pages/settings/liveThemeGenerator.test.ts",
+            "t3ui/pages/settings/environments/LocalEnvironment.test.ts",
+            "t3ui/components/motion/Motion.test.tsx",
+            "t3ui/components/thread/timeline/Shimmer.test.ts",
+            "t3ui/components/dialogSurface.test.ts",
+            "t3ui/components/thread/markdown/math.test.ts",
+            "t3ui/components/thread/markdown/shikiHighlight.test.ts",
+            "t3ui/cloud/connectAuth.test.ts",
+            "t3ui/cloud/t3Connect.test.ts",
+            "t3ui/backend-rpc-concurrency.test.ts",
+            "t3ui/pages/settings/OpenSourceLicenses.test.tsx"
+          )
+          foreach ($t in $tests) {
+            Write-Host "Running $t"
+            & $nsh test $t
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Verify packaged Windows archive and executable smoke launch
+        shell: pwsh
+        run: |
+          $verifyDir = "build/r3-win-verify"
+          if (Test-Path $verifyDir) { Remove-Item -Recurse -Force $verifyDir }
+          Expand-Archive -Path "build/R3-Code-windows-x64.zip" -DestinationPath $verifyDir -Force
+          $root = Join-Path $verifyDir "R3 Code"
+          $exe = Join-Path $root "R3 Code.exe"
+          $identityPath = Join-Path $root "nsh/build-identity.json"
+          foreach ($req in @($exe, (Join-Path $root "nsh/bundle.nshc"), (Join-Path $root "nsh/app.json"), (Join-Path $root "nsh/capabilities.json"), $identityPath, (Join-Path $root "nsh/assets/i18n/zh.json"), (Join-Path $root "nsh/assets/data/rpcResultSchemas.json"), (Join-Path $root "nsh/assets/data/nativeDependencyNotices.json"), (Join-Path $root "LICENSE.txt"))) {
+            if (!(Test-Path $req)) { throw "Missing packaged file: $req" }
+          }
+          $identity = Get-Content -Raw $identityPath | ConvertFrom-Json
+          $actualSha = (Get-FileHash -Path $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSha -ne $identity.hostExecutableSha256) {
+            throw "Digest mismatch: expected $($identity.hostExecutableSha256), got $actualSha"
+          }
+          $proc = Start-Process -FilePath $exe -WorkingDirectory $root -PassThru
+          try {
+            Start-Sleep -Seconds 2
+            $proc.Refresh()
+            if ($proc.HasExited) {
+              throw "Packaged R3 Code.exe exited prematurely with code $($proc.ExitCode)"
+            }
+          } finally {
+            if (!$proc.HasExited) {
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            }
+          }
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: R3-Code-windows-x64
+          path: build/R3-Code-windows-x64.zip
+          if-no-files-found: error

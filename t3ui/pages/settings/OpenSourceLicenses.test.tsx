@@ -78,3 +78,16 @@ test("the page shows the failure, retries, then lists searchable expandable noti
   await app.type("label:Search open-source licenses", "zzzz");
   await app.waitFor("text:No licenses match that search.");
 });
+
+test("external native notices handle malformed rows with error and recover on retry", async () => {
+  const app = await open("./OpenSourceLicensesFixture.tsx", { width: 1100, height: 900 });
+  await app.waitFor("text:Open-source notices are unavailable");
+  await app.press("label:Enable external native loader");
+  await app.press("label:View 620 native dependencies");
+  await app.waitFor("text:Native dependency notices contain an invalid text reference.");
+  await app.press("label:Retry native dependencies");
+  await app.waitFor("text:sample-crate");
+  await app.press("label:sample-crate license notice");
+  await app.waitFor("text:Copyright Example");
+  expect(app.texts().some((text) => text.includes("Copyright Example"))).toBe(true);
+});

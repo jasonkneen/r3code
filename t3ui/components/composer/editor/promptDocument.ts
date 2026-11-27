@@ -422,7 +422,10 @@ function listJson(list: PendingList): RichNodeJSON {
     return { type: "listItem", attrs: { indent: item.prefix.indent, marker: item.prefix.marker, space: item.prefix.space }, content };
   });
   if (first.kind === "task") return { type: "taskList", content: items };
-  if (first.kind === "ordered") return { type: "orderedList", attrs: { start: Number.parseInt(first.marker, 10) || 1 }, content: items };
+  if (first.kind === "ordered") {
+    const start = Number.parseInt(first.marker, 10);
+    return { type: "orderedList", attrs: { start: Number.isFinite(start) ? start : 1 }, content: items };
+  }
   return { type: "bulletList", content: items };
 }
 
@@ -544,8 +547,7 @@ export function promptLayout(doc: RichNodeJSON): PromptLayout {
     lastTextEnd = at;
     return at;
   };
-  // listItemPrefix / walkList: each item's marker as written, its paragraph, then its nested lists.
-  const itemPrefix = (item: RichNodeJSON, empty: boolean): string => {
+  const itemPrefix = (item: RichNodeJSON, empty: boolean, ordered: boolean, orderedNumber: number, delimiter: string): string => {
     const attrs = item.attrs ?? {};
     const indent = typeof attrs.indent === "string" ? attrs.indent : "";
     if (item.type === "taskItem") {
@@ -553,18 +555,26 @@ export function promptLayout(doc: RichNodeJSON): PromptLayout {
       const contentSpace = typeof attrs.contentSpace === "string" ? attrs.contentSpace || (empty ? "" : " ") : empty ? "" : " ";
       return `${indent}-${markerSpace}[${attrs.checked === true ? "x" : " "}]${contentSpace}`;
     }
-    const marker = typeof attrs.marker === "string" && attrs.marker ? attrs.marker : "-";
+    const rawMarker = typeof attrs.marker === "string" ? attrs.marker : "";
+    const marker = ordered
+      ? (/^\d+[.)]$/.test(rawMarker) ? rawMarker : `${orderedNumber}${delimiter}`)
+      : (/^[-*+]$/.test(rawMarker) ? rawMarker : "-");
     const space = typeof attrs.space === "string" ? attrs.space || (empty ? "" : " ") : empty ? "" : " ";
     return `${indent}${marker}${space}`;
   };
   const walkList = (list: RichNodeJSON, listPos: number) => {
     let itemPos = listPos + 1;
+    const ordered = list.type === "orderedList";
+    const listStart = ordered && typeof list.attrs?.start === "number" && Number.isFinite(list.attrs.start) ? list.attrs.start : 1;
+    const delimiter = ordered
+      ? ((list.content ?? []).map((entry) => entry.attrs?.marker).find((m): m is string => typeof m === "string" && /^\d+[.)]$/.test(m))?.slice(-1) ?? ".")
+      : "-";
     (list.content ?? []).forEach((item, itemIndex) => {
       if (itemIndex > 0) emit("\n", itemPos);
       let childPos = itemPos + 1;
       const first = item.content?.[0];
       const empty = first?.type === "paragraph" && (first.content ?? []).length === 0;
-      emit(itemPrefix(item, empty), childPos + 1);
+      emit(itemPrefix(item, empty, ordered, listStart + itemIndex, delimiter), childPos + 1);
       (item.content ?? []).forEach((child, childIndex) => {
         if (childIndex > 0) emit("\n", childPos);
         if (LIST_NODES.has(child.type)) walkList(child, childPos);
@@ -580,7 +590,7 @@ export function promptLayout(doc: RichNodeJSON): PromptLayout {
     const previous = blocks[index - 1];
     // isTrailingLineAfterRule: the empty line kept after a closing rule writes nothing.
     const trailingAfterRule = index === blocks.length - 1 && index > 0 && block.type === "paragraph" && (block.content ?? []).length === 0 && previous?.type === "horizontalRule";
-    if (index > 0 && !trailingAfterRule) emit("\n", pos - 1);
+    if (index > 0 && !trailingAfterRule) emit("\n", previous?.type === "horizontalRule" ? pos - 1 : lastTextEnd);
     // needsBlankLineAfterQuote: prose after a quote is set apart, or Markdown folds it into the quote.
     if (previous?.type === "blockquote" && block.type === "paragraph" && (block.content ?? []).length > 0) emit("\n", pos + 1);
     if (previous && LIST_NODES.has(previous.type)) {

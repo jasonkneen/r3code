@@ -1,5 +1,5 @@
 import { expect, test } from "nsh/test";
-import { activeSshTunnels, parseSshHosts, SSH_KEY_ONLY_MESSAGE, startSshTunnel, stopAllSshTunnels, testSshConnection, type ProcessRunner } from "./ssh";
+import { activeSshTunnels, defaultSshCommand, parseSshHosts, SSH_KEY_ONLY_MESSAGE, startSshTunnel, stopAllSshTunnels, testSshConnection, type ProcessRunner } from "./ssh";
 
 function fakeRunner(result: { code: number; stderr: string }) {
   const spawned: { args: string[]; killed: boolean; exit?: (r: { code: number }) => void; err?: (t: string) => void }[] = [];
@@ -34,4 +34,10 @@ test("password hosts get the key-only message; a tunnel forwards and is torn dow
   stopAllSshTunnels();
   expect(ok.spawned[0]!.killed).toBe(true);
   expect(activeSshTunnels().length).toBe(0);
+});
+
+test("defaultSshCommand resolves ssh.exe on Windows and /usr/bin/ssh elsewhere", () => {
+  expect(defaultSshCommand("windows")).toBe("ssh.exe");
+  expect(defaultSshCommand("macos")).toBe("/usr/bin/ssh");
+  expect(defaultSshCommand("linux")).toBe("/usr/bin/ssh");
 });

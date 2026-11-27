@@ -1,6 +1,6 @@
 // A theme token at a given alpha, as an rgba() string. NSH squares Tailwind alpha modifiers, so
 // classes like `bg-foreground/12` or `bg-destructive/90` are built here from the resolved token.
-import { colorScheme, token } from "nsh";
+import { colorScheme, platform, token } from "nsh";
 import { settingValue } from "../../store";
 import { builtThemeForMode } from "../../pages/settings/builtTheme";
 
@@ -62,7 +62,8 @@ export function overGlass(top: Parameters<typeof token>[0], amount: number): str
 /** The composer's glass surface at the configured opacity. */
 export function composerGlassSurface(): string {
   const mode = colorScheme() === "dark" ? "dark" : "light";
-  return tokenAlpha(mode === "dark" || builtThemeForMode(mode) !== "default" ? "surface-raised" : "card", glassOpacity());
+  const alpha = platform.os === "windows" ? Math.max(glassOpacity(), 0.94) : glassOpacity();
+  return tokenAlpha(mode === "dark" || builtThemeForMode(mode) !== "default" ? "surface-raised" : "card", alpha);
 }
 /** ComposerSurface's default and themed outlines. */
 export function composerOutline(): string {

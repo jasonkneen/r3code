@@ -20,6 +20,7 @@
 //     has always included the per-`dataDir` hash suffix; there was never an earlier unhashed service name or account
 //     scheme in this port to migrate from. If a future scheme change needs one, follow ClerkTokenStore's shape: read
 //     the old account/service once, write it under the new one, then remove the old item.
+import { host } from "nsh";
 import process, { run, spawn } from "process";
 
 export interface SecureStorage {
@@ -183,12 +184,51 @@ export function keychainServiceName(dataDir: string | null = process.dataDir): s
   return dataDir ? `${BASE_SERVICE} (${fnv1a(dataDir)})` : BASE_SERVICE;
 }
 
+export interface HostSecureStorageOptions {
+  service: string;
+  available?: () => boolean;
+  call?: (name: string, data: unknown, options?: { timeout?: number }) => Promise<unknown>;
+}
+
+export function createHostSecureStorage(options: HostSecureStorageOptions): SecureStorage {
+  const { service } = options;
+  const hostReady = options.available ?? (() => host.available());
+  const invoke = options.call ?? ((name, data, callOptions) => host.call(name, data, callOptions));
+  let available: Promise<boolean> | null = null;
+
+  return {
+    isEncryptionAvailable() {
+      available ??= (async () => {
+        if (!hostReady()) return false;
+        try {
+          return (await invoke("secureStorage.available", null, { timeout: 5000 })) === true;
+        } catch {
+          return false;
+        }
+      })();
+      return available;
+    },
+    async get(account) {
+      const value = await invoke("secureStorage.get", { service, account }, { timeout: TIMEOUT_MS });
+      return typeof value === "string" ? value : null;
+    },
+    async set(account, value) {
+      await invoke("secureStorage.set", { service, account, value }, { timeout: TIMEOUT_MS });
+    },
+    async remove(account) {
+      await invoke("secureStorage.remove", { service, account }, { timeout: TIMEOUT_MS });
+    },
+  };
+}
+
 let shared: SecureStorage | null = null;
 let override: SecureStorage | null = null;
 
 export function secureStorage(): SecureStorage {
   if (override) return override;
-  shared ??= createKeychainStorage({ cli: realSecurityCli, service: keychainServiceName() });
+  shared ??= process.platform === "macos"
+    ? createKeychainStorage({ cli: realSecurityCli, service: keychainServiceName() })
+    : createHostSecureStorage({ service: keychainServiceName() });
   return shared;
 }
 

@@ -3,10 +3,11 @@
 import { noteUserInput } from "./components/userActivity";
 import { prewarmShikiLanguages } from "./components/thread/markdown/shikiHighlight";
 import { clearHeldModifiers, noteHeldModifiers } from "./components/sidebar/jumpHints";
-import { effect, keymap, lifecycle, mount, View } from "nsh";
+import { effect, keymap, lifecycle, mount, platform, View } from "nsh";
 import { flushPendingDraftSave, openThread, usageOpen } from "./store";
 import { startThreadOverlayRetention } from "./components/thread/threadOverlayRetention";
 import { Window } from "nsh/desktop";
+import { isDeclarativeWindow, setMainWindowFrame, setMainWindowTitle, setMainWindowTitleBar } from "./desktop/windowControl";
 import { installKeybindings } from "./commands/registry";
 import { installSnapShotShortcut } from "./commands/snapShotShortcut";
 import { installStandardCommands, toggleSettings } from "./commands/standardCommands";
@@ -126,19 +127,37 @@ function App() {
   );
 }
 
-Window.setTitle("R3 Code");
-// The web desktop shell has no system title bar: the sidebar's blueprint header and the
-// thread header reach the window's top edge, with the traffic lights centred in that 52pt band.
-Window.setTitleBar({ style: "hidden", height: 52 });
+if (!isDeclarativeWindow()) {
+  setMainWindowTitle("R3 Code");
+  // The web desktop shell has no system title bar: the sidebar's blueprint header and the
+  // thread header reach the window's top edge, with the traffic lights centred in that 52pt band.
+  setMainWindowTitleBar({ style: "hidden", height: 52 });
+}
 // Test copies only (tools/run_local.py forwards it): "x,y" in screen points places the window, so an agent's test
 // window can sit clear of the windows covering it (a fully covered window takes no posted clicks or keys).
 try {
   const testOrigin = (process.env.T3GPUI_TEST_WINDOW_ORIGIN ?? "").split(",").map(Number);
-  if (testOrigin.length === 2 && testOrigin.every(Number.isFinite)) setTimeout(() => Window.setFrame({ origin: { x: testOrigin[0], y: testOrigin[1] } }), 1500);
+  if (testOrigin.length === 2 && testOrigin.every(Number.isFinite)) setTimeout(() => setMainWindowFrame({ origin: { x: testOrigin[0], y: testOrigin[1] } }), 1500);
 } catch { /* not allowed to read it: leave the window where the system put it */ }
 void prefetchIcons(HEADER_ICONS);
 void initializeBackend();
 installEnvironmentConnections();
 // Shiki grammars for the common languages build at the first idle moment (shikiHighlight.ts), not on the first block.
-prewarmShikiLanguages();
-mount(App);
+if (platform.os !== "windows") prewarmShikiLanguages();
+if (isDeclarativeWindow()) {
+  const NativeWindow = Window as unknown as (props: Record<string, unknown>) => any;
+  mount(() => (
+    <NativeWindow
+      id="main"
+      title="R3 Code"
+      titleBar={{ style: "hidden", height: 52 }}
+      defaultSize={{ width: 1280, height: 840 }}
+      minSize={{ width: 400, height: 360 }}
+      restoreBounds={true}
+    >
+      <App />
+    </NativeWindow>
+  ));
+} else {
+  mount(App);
+}

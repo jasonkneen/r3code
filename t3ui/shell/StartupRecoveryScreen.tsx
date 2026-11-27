@@ -4,7 +4,7 @@
 // prior build or the releases page. Retry re-runs the same check that raised the offer; Quit closes the window
 // (quitHold.ts's own quit action, so an open SSH tunnel is still stopped).
 import { Clipboard, openUrl, signal, Text, View } from "nsh";
-import { Window } from "nsh/desktop";
+import { closeMainWindow } from "../desktop/windowControl";
 import { startupRecoveryOffer, STARTUP_RECOVERY_RELEASES_URL, type StartupRecoveryOffer } from "../desktop/startupRecovery";
 
 function offerHeading(offer: StartupRecoveryOffer): string {
@@ -54,7 +54,7 @@ function StartupRecoveryScreen(props: { offer: StartupRecoveryOffer; onRetry: ()
           ) : (
             <Button label="Open releases page" onPress={() => { void openUrl(STARTUP_RECOVERY_RELEASES_URL).catch(() => undefined); }} />
           )}
-          <Button label="Quit" onPress={() => { Window.close(); }} />
+          <Button label="Quit" onPress={() => { closeMainWindow(); }} />
         </View>
         {offer.kind === "managed-policy" ? (
           <View class="mt-5 overflow-hidden rounded-lg border border-border-70 bg-background">

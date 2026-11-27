@@ -6,7 +6,7 @@ import { ensureLegacyLocalStorageImported } from "./desktop/legacyLocalStorageIm
 import { handOffAttachmentPreview } from "./components/thread/attachmentPreviewHandoff";
 import { resolveConfiguredEnvMode, resolveNewThreadEnvMode } from "./components/thread/newThreadEnvMode";
 import { T3_PROJECT_FILE_NAME } from "./components/header/t3ProjectFile";
-import { batch, computed, effect, lifecycle, reduceMotion, signal, Storage, setColorScheme, untracked } from "nsh";
+import { batch, computed, effect, lifecycle, platform, reduceMotion, signal, Storage, setColorScheme, untracked } from "nsh";
 import { resolveEffectiveComposerModel } from "./components/composer/modelFixup";
 import { preservedOpenCodeOptions } from "./components/composer/composerProviderState";
 import { toggleWithLayout } from "./components/motion/Motion";
@@ -28,7 +28,14 @@ import { showToast } from "./components/toast/toastState";
 import { redirectPendingApprovals } from "./components/approvals/approvalLogic";
 import { BackendClient, record, RequestFailure } from "./backend/client";
 import { createThreadWireDecoder, forgetDeferredWork } from "./backend/threadWire";
-import { environmentConfigs, managedEnvironment, parseScopedKey, probeEnvironments, scopeResult, remoteShellThread, routePayload, requestEnvironment, subscribeEnvironment, withRemoteShells } from "./environments/connectionManager";
+import {
+  countUnloadedOlderSettled, environmentConfigs, hasConnectedRemoteOlderSettled, loadRemoteOlderSettledPages, managedEnvironment,
+  OLDER_SETTLED_PAGE_SIZE, olderSettledCountRowKeyFor, parseScopedKey, probeEnvironments, readOlderSettledCut,
+  remoteOlderSettledProjectCount, remoteOlderSettledStatuses, remoteShellThread, remoteUnloadedOlderSettledCount,
+  requestEnvironment, resetFailedRemoteOlderSettled, routePayload, scopeResult, subscribeEnvironment, withRemoteShells,
+  type OlderSettledCut, type OlderSettledStatus,
+} from "./environments/connectionManager";
+export type { OlderSettledCut } from "./environments/connectionManager";
 import { mergeArchiveSnapshot, recordArchiveChange, type ArchiveChanges } from "./environments/archiveSnapshot";
 import { clearFamilyRemovals, recordFamilyShellEvent } from "./environments/familyRemovals";
 import { fetchShellSnapshotWith, isSerialConfigMethod, ReconnectLadder, runInConfigLane, runShellStream } from "./environments/environmentSession";
@@ -539,7 +546,11 @@ export async function applyNewThreadWorkspaceDefault(id: string, projectId: stri
   });
   // The new-projects root is read only when it can change the answer.
   // readThreadShells + readUnloadedThreadCount: threads below the older-settled cut count too.
-  const projectHasThreads = project.threads.length > 0 || (olderSettledCut()?.counts.find((entry) => entry.projectId === projectId)?.count ?? 0) > 0;
+  const parsedProject = parseScopedKey(projectId);
+  const olderProjectCount = parsedProject
+    ? remoteOlderSettledProjectCount(parsedProject.environmentId, parsedProject.localId)
+    : (olderSettledCut()?.counts.find((entry) => entry.projectId === projectId)?.count ?? 0);
+  const projectHasThreads = project.threads.length > 0 || olderProjectCount > 0;
   let newProjectsRoot: string | null = null;
   if (configured.mode === "worktree" && configured.source === "environment" && !projectHasThreads) {
     try { const root = record(await request("server.getConfig", {}))?.newProjectsRoot; newProjectsRoot = typeof root === "string" && root.length > 0 ? root : null; } catch { newProjectsRoot = null; }
@@ -1625,8 +1636,12 @@ interface ThreadDetailCache {
   /** The last stream sequence applied to this detail (the reference's ThreadResumeSnapshot.sequence); null when unknown. */
   sequence: number | null;
 }
+function maxThreadDetailCache(): number {
+  try { return platform.os === "windows" ? 3 : 8; } catch { return 8; }
+}
 const threadDetailCache = new Map<string, ThreadDetailCache>();
 function stashThreadDetail(threadId: string) {
+  threadDetailCache.delete(threadId);
   threadDetailCache.set(threadId, {
     runtimeRequests: runtimeRequests(), turnItems: turnItems(), turnItemOrders: turnItemOrders(),
     subagentRecords: subagentRecords(), runList: runList(), checkpointList: checkpointList(),
@@ -1635,6 +1650,40 @@ function stashThreadDetail(threadId: string) {
     threadRecord: threadRecord(), providerSessions: providerSessionRecords(), providerThreads: providerThreadRecords(),
     providerState: providerState(), bannerState: threadSessionState(), sequence: openThreadSequence,
   });
+  const limit = maxThreadDetailCache();
+  if (threadDetailCache.size <= limit) return;
+  const activeId = untracked(openThreadId);
+  const evictedDetails: string[] = [];
+  const evictedTranscripts: string[] = [];
+  for (const candidate of threadDetailCache.keys()) {
+    if (threadDetailCache.size <= limit) break;
+    if (candidate === threadId || candidate === activeId || sideSubscriptions.has(candidate)) continue;
+    threadDetailCache.delete(candidate);
+    threadWireDecoders.delete(`open:${candidate}`);
+    threadHistoryLoadVersions.delete(candidate);
+    evictedDetails.push(candidate);
+    if (isServerThread(candidate)) evictedTranscripts.push(candidate);
+  }
+  if (evictedTranscripts.length > 0) {
+    transcripts.update((all) => {
+      let changed = false;
+      const next = { ...all };
+      for (const id of evictedTranscripts) {
+        if (id in next) { delete next[id]; changed = true; }
+      }
+      return changed ? next : all;
+    });
+  }
+  if (evictedDetails.length > 0) {
+    threadHistoryByThread.update((all) => {
+      let changed = false;
+      const next = { ...all };
+      for (const id of evictedDetails) {
+        if (id in next) { delete next[id]; changed = true; }
+      }
+      return changed ? next : all;
+    });
+  }
 }
 /** The open thread's own record and provider sessions/threads as the stream delivers them (projection.thread, .providerSessions, .providerThreads). */
 const threadRecord = signal<Record<string, unknown> | null>(null);
@@ -3266,27 +3315,61 @@ const primaryShellThreads = () => {
 };
 
 // ---- Older settled threads (olderSettledThreads.ts, web state/olderSettledShelf.ts) ----
-/** The snapshot's `olderSettled` cut: threads settled before it are left out and counted per project. */
-export interface OlderSettledCut { before: string; asOfSequence: number; counts: { projectId: string; count: number }[] }
 const olderSettledCutSignal = signal<OlderSettledCut | null>(null);
 export const olderSettledCut = () => olderSettledCutSignal();
 /** Rows read below the cut with orchestration.getOlderSettledThreads, newest settle first. */
 let olderSettledRows: Record<string, unknown>[] = [];
 const olderSettledLoaded = signal(0);
 export const olderSettledLoadedCount = () => olderSettledLoaded();
-const olderSettledStatusSignal = signal<"ready" | "pending" | "failed" | "done">("ready");
-export const olderSettledStatus = () => olderSettledStatusSignal();
+const olderSettledStatusSignal = signal<OlderSettledStatus>("ready");
+const olderSettledScopeKeySignal = signal("");
+const NONE_SCOPE_KEY = "\0none";
 let olderSettledFrontier: { settledAt: string; threadId?: string } | null = null;
 let olderSettledGeneration = 0;
 let olderSettledCountGeneration = 0;
 let olderSettledCountTimer: ReturnType<typeof setTimeout> | null = null;
-const OLDER_SETTLED_PAGE_SIZE = 25;
-function readOlderSettledCut(value: unknown): OlderSettledCut | null {
-  const cut = record(value);
-  if (!cut || typeof cut.before !== "string" || typeof cut.asOfSequence !== "number" || !Array.isArray(cut.counts)) return null;
-  return { before: cut.before, asOfSequence: cut.asOfSequence, counts: cut.counts.map(record).flatMap((entry) =>
-    entry && typeof entry.projectId === "string" && typeof entry.count === "number" ? [{ projectId: entry.projectId, count: entry.count }] : []) };
+let olderSettledPageDropped: Set<string> | null = null;
+
+function primaryScopeFor(projectIds: readonly string[] | undefined): { key: string; localIds: string[] | undefined; targeted: boolean } {
+  if (!projectIds || projectIds.length === 0) return { key: "", localIds: undefined, targeted: true };
+  const localIds = projectIds.filter((id) => parseScopedKey(id) === null);
+  if (localIds.length === 0) return { key: NONE_SCOPE_KEY, localIds: undefined, targeted: false };
+  return { key: [...localIds].sort().join("\n"), localIds, targeted: true };
 }
+
+export const olderSettledStatus = (projectIds?: readonly string[]): OlderSettledStatus => {
+  const statuses: OlderSettledStatus[] = [];
+  const cut = olderSettledCutSignal();
+  const currentScopeKey = olderSettledScopeKeySignal();
+  if (cut) {
+    if (projectIds !== undefined) {
+      const target = primaryScopeFor(projectIds);
+      if (target.targeted) statuses.push(target.key === currentScopeKey ? olderSettledStatusSignal() : "ready");
+    } else if (currentScopeKey !== NONE_SCOPE_KEY) {
+      statuses.push(olderSettledStatusSignal());
+    }
+  }
+  statuses.push(...remoteOlderSettledStatuses(projectIds));
+  if (statuses.length === 0) return projectIds !== undefined ? "done" : olderSettledStatusSignal();
+  if (statuses.includes("pending")) return "pending";
+  if (statuses.includes("ready")) return "ready";
+  if (statuses.includes("failed")) return "failed";
+  return "done";
+};
+
+export function canLoadOlderSettled(projectIds?: readonly string[]): boolean {
+  const primaryTarget = primaryScopeFor(projectIds);
+  const cut = olderSettledCutSignal();
+  if (cut && primaryTarget.targeted) {
+    olderSettledLoaded();
+    projects();
+    loose();
+    const filter = primaryTarget.localIds ? new Set(primaryTarget.localIds) : undefined;
+    if (countUnloadedOlderSettled(cut, primaryShellThreads(), filter) > 0) return true;
+  }
+  return hasConnectedRemoteOlderSettled(projectIds);
+}
+
 /** An authoritative snapshot names a new cut: the pages read below the old one are dropped. */
 function resetOlderSettled(cut: OlderSettledCut | null) {
   olderSettledGeneration += 1;
@@ -3295,6 +3378,7 @@ function resetOlderSettled(cut: OlderSettledCut | null) {
   olderSettledCountTimer = null;
   olderSettledRows = [];
   olderSettledFrontier = null;
+  olderSettledPageDropped = null;
   olderSettledCutSignal.set(cut);
   olderSettledLoaded.set(0);
   olderSettledStatusSignal.set("ready");
@@ -3319,80 +3403,79 @@ function refreshOlderSettledCounts() {
 }
 
 function olderSettledCountRowKey(row: Record<string, unknown> | undefined): string | null {
-  const cut = olderSettledCutSignal();
-  if (!row || !cut) return null;
-  const lineage = record(row.lineage);
-  const created = typeof row.createdAt === "string" ? Date.parse(row.createdAt) : NaN;
-  if (lineage?.relationshipToParent === "subagent" || lineage?.sideChat === true || created >= Date.parse(cut.before)) return null;
-  if (!Number.isFinite(created)) return null;
-  const at = typeof row.settledAt === "string" ? Date.parse(row.settledAt) : NaN;
-  return `${row.id}:${row.settledOverride === "settled" && at < Date.parse(cut.before) ? 1 : 0}`;
+  return olderSettledCountRowKeyFor(olderSettledCutSignal(), row);
 }
 /** Older settled threads in scope this client does not hold (unloadedOlderSettledCount). */
 export function unloadedOlderSettledCount(projectIds?: ReadonlySet<string>): number {
+  const filter = projectIds && projectIds.size > 0 ? projectIds : undefined;
+  const primaryFilter = filter ? new Set([...filter].filter((id) => parseScopedKey(id) === null)) : undefined;
+  let total = 0;
   const cut = olderSettledCutSignal();
-  if (!cut) return 0;
-  if (projectIds && projectIds.size === 0) projectIds = undefined;
-  const total = cut.counts.reduce((sum, entry) => sum + (!projectIds || projectIds.has(entry.projectId) ? entry.count : 0), 0);
-  // A row may arrive as a shell update before its older-settled page is read.
-  // Count the merged rows once, using the same cut and listed-thread predicate
-  // as the server and the reference client.
-  olderSettledLoaded();
-  projects();
-  loose();
-  const before = Date.parse(cut.before);
-  const loaded = primaryShellThreads().filter((row) => {
-    const lineage = record(row.lineage);
-    const at = typeof row.settledAt === "string" ? Date.parse(row.settledAt) : NaN;
-    return (!projectIds || projectIds.has(String(row.projectId))) && row.settledOverride === "settled"
-      && lineage?.relationshipToParent !== "subagent" && lineage?.sideChat !== true && at < before;
-  }).length;
-  return Math.max(0, total - loaded);
+  if (cut && (!filter || primaryFilter!.size > 0)) {
+    olderSettledLoaded();
+    projects();
+    loose();
+    total += countUnloadedOlderSettled(cut, primaryShellThreads(), primaryFilter);
+  }
+  total += remoteUnloadedOlderSettledCount(filter);
+  return total;
 }
 /** Reads the next page below the cut (olderSettledThreads.ts pageRowsAtom, 25 per page). */
-let olderSettledScopeKey = "";
 /** The sidebar's project scope (olderSettledScopes): pages are read per scope, so another scope starts from the cut again. */
-function useOlderSettledScope(projectIds: readonly string[] | undefined) {
-  const key = projectIds && projectIds.length > 0 ? [...projectIds].sort().join("\n") : "";
-  if (key === olderSettledScopeKey) return;
-  olderSettledScopeKey = key;
+function useOlderSettledScope(key: string) {
+  if (key === olderSettledScopeKeySignal()) return;
+  olderSettledScopeKeySignal.set(key);
   olderSettledGeneration += 1;
   olderSettledRows = [];
   olderSettledFrontier = null;
+  olderSettledPageDropped = null;
   olderSettledLoaded.set(0);
   olderSettledStatusSignal.set("ready");
   updateShell();
 }
 export async function loadOlderSettledPage(projectIds?: readonly string[]): Promise<void> {
-  useOlderSettledScope(projectIds);
-  const cut = olderSettledCutSignal();
-  const status = olderSettledStatusSignal();
-  if (!cut || status === "pending" || status === "done") return;
-  const generation = olderSettledGeneration;
-  olderSettledStatusSignal.set("pending");
-  try {
-    const page = record(await requestBackend("orchestration.getOlderSettledThreads", {
-      before: olderSettledFrontier ?? { settledAt: cut.before },
-      ...(projectIds && projectIds.length > 0 ? { projectIds: [...projectIds] } : {}),
-      limit: OLDER_SETTLED_PAGE_SIZE,
-    }));
-    if (generation !== olderSettledGeneration) return;
-    const threads = Array.isArray(page?.threads) ? page.threads.map(record).filter((item): item is Record<string, unknown> => item !== null) : [];
-    olderSettledRows = [...olderSettledRows, ...threads.filter((thread) => !olderSettledRows.some((row) => row.id === thread.id))];
-    const last = threads[threads.length - 1];
-    if (threads.length < OLDER_SETTLED_PAGE_SIZE || typeof last?.settledAt !== "string") olderSettledStatusSignal.set("done");
-    else { olderSettledFrontier = { settledAt: last.settledAt, threadId: String(last.id) }; olderSettledStatusSignal.set("ready"); }
-    olderSettledLoaded.set(olderSettledRows.length);
-    updateShell();
-  } catch (error) {
-    if (generation !== olderSettledGeneration) return;
-    olderSettledStatusSignal.set("failed");
-    reportError(error);
-  }
+  const primaryTarget = primaryScopeFor(projectIds);
+  useOlderSettledScope(primaryTarget.key);
+  const runPrimary = async () => {
+    const cut = olderSettledCutSignal();
+    const status = olderSettledStatusSignal();
+    if (!primaryTarget.targeted || !cut || status !== "ready") return;
+    const generation = olderSettledGeneration;
+    const dropped = new Set<string>();
+    olderSettledPageDropped = dropped;
+    olderSettledStatusSignal.set("pending");
+    try {
+      const page = record(await requestBackend("orchestration.getOlderSettledThreads", {
+        before: olderSettledFrontier ?? { settledAt: cut.before },
+        ...(primaryTarget.localIds ? { projectIds: [...primaryTarget.localIds] } : {}),
+        limit: OLDER_SETTLED_PAGE_SIZE,
+      }));
+      if (generation !== olderSettledGeneration) return;
+      const threads = Array.isArray(page?.threads) ? page.threads.map(record).filter((item): item is Record<string, unknown> => item !== null) : [];
+      olderSettledRows = [...olderSettledRows, ...threads.filter((thread) => !dropped.has(String(thread.id)) && !olderSettledRows.some((row) => row.id === thread.id))];
+      const last = threads[threads.length - 1];
+      if (threads.length < OLDER_SETTLED_PAGE_SIZE || typeof last?.settledAt !== "string") olderSettledStatusSignal.set("done");
+      else { olderSettledFrontier = { settledAt: last.settledAt, threadId: String(last.id) }; olderSettledStatusSignal.set("ready"); }
+      olderSettledLoaded.set(olderSettledRows.length);
+      updateShell();
+    } catch (error) {
+      if (generation !== olderSettledGeneration) return;
+      olderSettledStatusSignal.set("failed");
+      reportError(error);
+    } finally {
+      if (olderSettledPageDropped === dropped) olderSettledPageDropped = null;
+    }
+  };
+  const [, remoteChanged] = await Promise.all([
+    runPrimary(),
+    loadRemoteOlderSettledPages(projectIds, reportError),
+  ]);
+  if (remoteChanged) updateShell();
 }
 /** Retry after a failed page read (olderSettledShelf retry). */
 export function retryOlderSettledPage(projectIds?: readonly string[]): Promise<void> {
   if (olderSettledStatusSignal() === "failed") olderSettledStatusSignal.set("ready");
+  resetFailedRemoteOlderSettled(projectIds);
   return loadOlderSettledPage(projectIds);
 }
 const primaryShellProjects = () => shellProjects;
@@ -3529,21 +3612,35 @@ function handleShellEvent(value: unknown) {
     advanceShellCursor(event.sequence);
     const thread = record(event.thread);
     if (!thread || typeof thread.id !== "string") return;
-    const previousCountKey = olderSettledCountRowKey(shellThreads.find((item) => item.id === thread.id));
+    if (olderSettledPageDropped) {
+      if (event.location === "archive") olderSettledPageDropped.add(thread.id);
+      else if (event.location === "active") olderSettledPageDropped.delete(thread.id);
+    }
+    const previousRow = shellThreads.find((item) => item.id === thread.id)
+      ?? olderSettledRows.find((item) => item.id === thread.id);
+    const previousCountKey = olderSettledCountRowKey(previousRow);
     // An update in the same location replaces the record where it is, so the list order (and every other row) stays put.
     const activeIndex = shellThreads.findIndex((item) => item.id === thread.id);
     const archiveIndex = archivedShellThreads.findIndex((item) => item.id === thread.id);
     if (event.location === "active" && activeIndex >= 0 && archiveIndex < 0) shellThreads[activeIndex] = thread;
-    else if (event.location === "archive" && archiveIndex >= 0 && activeIndex < 0) archivedShellThreads[archiveIndex] = thread;
-    else {
+    else if (event.location === "archive" && archiveIndex >= 0 && activeIndex < 0) {
+      olderSettledRows = olderSettledRows.filter((item) => item.id !== thread.id);
+      archivedShellThreads[archiveIndex] = thread;
+    } else {
       shellThreads = shellThreads.filter((item) => item.id !== thread.id);
       archivedShellThreads = archivedShellThreads.filter((item) => item.id !== thread.id);
       if (event.location === "active") shellThreads.push(thread);
-      else if (event.location === "archive") archivedShellThreads.push(thread);
+      else if (event.location === "archive") {
+        olderSettledRows = olderSettledRows.filter((item) => item.id !== thread.id);
+        archivedShellThreads.push(thread);
+      }
     }
-    if (previousCountKey !== olderSettledCountRowKey(event.location === "active" ? thread : undefined)) refreshOlderSettledCounts();
+    const archivedMayBeOlder = event.location === "archive" && previousRow === undefined && Boolean(olderSettledCutSignal())
+      && (typeof thread.createdAt !== "string" || olderSettledCountRowKey(thread) !== null);
+    if (previousCountKey !== olderSettledCountRowKey(event.location === "active" ? thread : undefined) || archivedMayBeOlder) refreshOlderSettledCounts();
   } else if (event.kind === "thread.removed") {
     advanceShellCursor(event.sequence);
+    if (olderSettledPageDropped && typeof event.threadId === "string") olderSettledPageDropped.add(event.threadId);
     olderSettledRows = olderSettledRows.filter((item) => item.id !== event.threadId);
     if (event.location === "active") shellThreads = shellThreads.filter((item) => item.id !== event.threadId);
     if (event.location === "archive") archivedShellThreads = archivedShellThreads.filter((item) => item.id !== event.threadId);
@@ -3987,8 +4084,9 @@ function seedThreadWire(key: string, threadId: string, detail: ThreadDetailCache
 export interface ThreadHistoryState { cursor: string | null; hasMore: boolean; loading: boolean; error: string | null }
 const threadHistoryByThread = signal<Record<string, ThreadHistoryState>>({});
 const threadHistoryLoadVersions = new Map<string, number>();
+let nextThreadHistoryLoadVersion = 0;
 function invalidateThreadHistoryLoad(threadId: string): number {
-  const version = (threadHistoryLoadVersions.get(threadId) ?? 0) + 1;
+  const version = ++nextThreadHistoryLoadVersion;
   threadHistoryLoadVersions.set(threadId, version);
   return version;
 }
@@ -4505,8 +4603,16 @@ export function retainThread(threadId: string): () => void {
     if (current.count > 0) return;
     current.stop?.();
     sideSubscriptions.delete(threadId);
+    threadWireDecoders.delete(`side:${threadId}`);
     stableSideMessages.delete(threadId);
     sideProjections.update((all) => { const { [threadId]: _dropped, ...rest } = all; return rest; });
+    if (threadId !== untracked(openThreadId) && !threadDetailCache.has(threadId) && isServerThread(threadId)) {
+      transcripts.update((all) => {
+        if (!(threadId in all)) return all;
+        const { [threadId]: _dropped, ...rest } = all;
+        return rest;
+      });
+    }
   };
 }
 /** How many views hold `threadId`'s extra subscription (0 when none), for tests and diagnostics. */

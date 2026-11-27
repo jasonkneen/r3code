@@ -1,7 +1,7 @@
 // DesktopWindow.ts + settings/DesktopAppSettings.ts: the main window keeps its size and place across launches
 // (mainWindowBounds / mainWindowMaximized, saved 500 ms after the last move or resize, restored only when it still fits
 // on a connected screen, 1 px tolerance) and never gets smaller than 400 x 360.
-import { Window } from "nsh/desktop";
+import { setMainWindowFrame, toggleMainWindowMaximize } from "./windowControl";
 import process from "process";
 import { desktop } from "./runtime";
 import { onDesktopHostEvent, readWindowFrame, setWindowMinSize, setWindowOrigin, isFrame, type ScreenArea, type WindowFrameInfo } from "./desktopHost";
@@ -78,9 +78,9 @@ export function installWindowBounds(options: { restore?: boolean } = {}) {
       if (initial) {
         // The GPUI host's Window.setFrame sizes but never moves the window (chrome.rs SetFrame: "GPUI sizes a window
         // but leaves its place to the platform"), so the place goes through host patch 0010's window.setOrigin.
-        Window.setFrame({ size: { width: initial.width, height: initial.height } });
-        if (!(await setWindowOrigin(initial.x, initial.y))) Window.setFrame({ origin: { x: initial.x, y: initial.y } });
-        if (initial.maximized && !frame.maximized) Window.toggleMaximize();
+        setMainWindowFrame({ size: { width: initial.width, height: initial.height } });
+        if (!(await setWindowOrigin(initial.x, initial.y))) setMainWindowFrame({ origin: { x: initial.x, y: initial.y } });
+        if (initial.maximized && !frame.maximized) toggleMainWindowMaximize();
       }
     }
     ready = true;

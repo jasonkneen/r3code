@@ -4,7 +4,7 @@
 // Lanes shared across methods follow the reference's shared schedulers (vcsCommandScheduler, preview lifecycleScheduler,
 // projectScheduler, sourceControl commandScheduler).
 import { signal } from "nsh";
-import { rpcResultSchemaIssue } from "./rpcResultSchema";
+import { ensureRpcResultSchema, isExternalRpcSchemaCatalog, rpcResultSchemaIssue } from "./rpcResultSchema";
 import { writeDecodeFailure } from "./rpcDecodeLog";
 
 type Dict = Record<string, unknown>;
@@ -159,10 +159,26 @@ export function decodeRpcResult<T>(method: string, value: T): T {
   return value;
 }
 
+export async function decodeRpcResultAsync<T>(method: string, value: T): Promise<T> {
+  if (!resultDecoding) return value;
+  if (isExternalRpcSchemaCatalog()) {
+    try {
+      await ensureRpcResultSchema(method);
+    } catch (cause) {
+      const issue = cause instanceof Error && cause.message ? cause.message : "Could not load RPC result schema.";
+      console.error(`RpcResultDecodeError ${method}: ${issue}`);
+      try { failureSink?.({ method, issue, at: new Date().toISOString() }); } catch { /* logging never fails the call */ }
+      if (rpcResultEnforced()) throw new RpcResultDecodeError(method, issue);
+      return value;
+    }
+  }
+  return decodeRpcResult(method, value);
+}
+
 /** Reference wrapper: payload flags plus the keyed concurrency, for one environment's request function. */
 export function requestWithRpcPolicy<T>(environment: string, method: string, payload: unknown, send: (payload: unknown) => Promise<T>): Promise<T> {
   const sent = rpcPayloadFor(method, payload);
-  const result = runWithRpcConcurrency(environment, method, sent, () => send(sent).then((value) => decodeRpcResult(method, value)));
+  const result = runWithRpcConcurrency(environment, method, sent, () => send(sent).then((value) => decodeRpcResultAsync(method, value)));
   if (REFS_INVALIDATING.has(method)) {
     const settle = () => invalidateVcsRefs(dict(sent).cwd);
     result.then(settle, settle);

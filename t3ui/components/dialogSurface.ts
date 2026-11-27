@@ -6,8 +6,9 @@
 //
 // Build the scrim alpha explicitly because NSH squares Tailwind alpha modifiers.
 // The macOS GPUI host paints backdrop-filter through its cached Metal blur passes.
-import { Animated, cleanup, colorScheme, createMotion, effect, signal, untracked } from "nsh";
+import { Animated, cleanup, colorScheme, createMotion, effect, reduceMotion, signal, untracked } from "nsh";
 import { tokenAlpha } from "./composer/tokenColor";
+import { applyStartValues, specStartValues } from "./motion/Motion";
 import { dialogScaleEnter, dialogScaleExit } from "./motion/motionTokens";
 
 /** Blur radius of `dialog-backdrop`, in points. */
@@ -29,13 +30,14 @@ export const DIALOG_CARD_CLASS = "rounded-2xl border border-border bg-background
  * `style`; the Dialog's own `animation="fade"` does the opacity. `open` defaults to "open while mounted".
  */
 export function dialogPopupMotion(open: () => boolean = () => true) {
-  const motion = createMotion();
+  const initiallyOpen = untracked(open);
+  const motion = createMotion(initiallyOpen && !reduceMotion() ? { initial: specStartValues(dialogScaleEnter) } : undefined);
   const id = ++dialogSequence;
   let first = true;
   effect(() => {
     const on = open();
     untracked(() => {
-      if (on) { void motion.play(dialogScaleEnter); openDialogs.set([...openDialogs().filter((other) => other !== id), id]); }
+      if (on) { applyStartValues(motion, dialogScaleEnter); void motion.play(dialogScaleEnter); openDialogs.set([...openDialogs().filter((other) => other !== id), id]); }
       else { openDialogs.set(openDialogs().filter((other) => other !== id)); if (!first) void motion.play(dialogScaleExit); }
     });
     first = false;

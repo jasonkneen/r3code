@@ -1,4 +1,4 @@
-import { announce, cleanup, computed, createMotion, effect, Image, List, reduceMotion, signal, Text, untracked, View, windowSize } from "nsh";
+import { announce, cleanup, computed, createMotion, effect, Image, List, platform, reduceMotion, signal, Text, untracked, View, windowSize } from "nsh";
 import type { StyleProp, ViewStyle } from "nsh";
 import { panelAnimationMs } from "../components/motion/panelMotion";
 import { EASE_DEFAULT } from "../components/motion/motionTokens";
@@ -530,9 +530,24 @@ export function ThreadTimeline(props: {
     highlighted.set(null);
     clearTimeout(highlightTimer);
     const epoch = ++scrollEpoch;
-    // Until the thread is positioned, the list's own scrolls are not where the reader left it.
     restoring = true;
     restoreCancelled = false;
+    const pendingNow = untracked(sidebarSearchNavigation);
+    const blockedBySearch = Boolean(pendingNow && pendingNow.environment === scope.environment && pendingNow.generation === scope.generation && pendingNow.threadId === scope.threadId);
+    const currentNow = untracked(list);
+    const rowsNow = untracked(rows);
+    if (currentNow && !blockedBySearch && rowsNow.length > 0) {
+      const immediateTarget = restoreTarget(timelinePositions.recall(key), rowsNow.map((row) => row.id));
+      if (immediateTarget.kind === "row") {
+        follow.release();
+        currentNow.scrollToIndex({ index: immediateTarget.index, animated: false, viewPosition: 0, viewOffset: -immediateTarget.offsetWithinRow });
+      } else if (immediateTarget.kind === "offset") {
+        follow.release();
+        currentNow.scrollToOffset({ offset: immediateTarget.offset, animated: false });
+      } else {
+        currentNow.scrollToEnd({ animated: false });
+      }
+    }
     requestAnimationFrame(() => {
       // The reader can scroll between switching threads and this first frame.
       // Do not reset their cancellation or apply the remembered position after it.
@@ -654,8 +669,21 @@ export function ThreadTimeline(props: {
     const frame = requestAnimationFrame(() => { follow.release(); currentList.scrollToIndex({ index, animated: false, viewPosition: 0.35 }); });
     return () => cancelAnimationFrame(frame);
   });
+  let wheelEndTimer: ReturnType<typeof setTimeout> | undefined;
+  cleanup(() => clearTimeout(wheelEndTimer));
+  const handleTranscriptWheel = (event: { deltaY: number; modifiers?: { control?: boolean; ctrl?: boolean } }) => {
+    if (event.deltaY === 0 || event.modifiers?.control || event.modifiers?.ctrl) return;
+    minimapGesture.stop();
+    const interrupted = settling() || anchorRowId() !== null;
+    restoreCancelled = true; settling.set(false); releaseAnchor();
+    if (interrupted) follow.release();
+    follow.beginUserScroll();
+    follow.navigate({ source: "wheel", direction: event.deltaY < 0 ? "up" : "down" });
+    clearTimeout(wheelEndTimer);
+    wheelEndTimer = setTimeout(() => { wheelEndTimer = undefined; follow.endUserScroll(); }, 250);
+  };
   return (
-    <View class="relative min-h-0 flex-1" onLayout={(event) => timelineWidth.set(event.bounds.size.width)} onMouseMove={(event) => releaseMinimapPassThrough(event.pressedButton)}>
+    <View class="relative min-h-0 flex-1" onLayout={(event) => timelineWidth.set(event.bounds.size.width)} onMouseMove={(event) => releaseMinimapPassThrough(event.pressedButton)} {...(platform.os === "windows" ? { onWheel: handleTranscriptWheel } : {})}>
     <List
       ref={(node) => list.set(node)}
       class="min-h-0 flex-1"

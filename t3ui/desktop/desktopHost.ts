@@ -4,7 +4,7 @@
 // `app.openUrls`, `app.reopen`, `window.frameChanged`, `notifications.clicked`). A host without the patch rejects
 // `desktop.capabilities`: every function here then does nothing and resolves false, and the app keeps its fallbacks.
 import { host } from "nsh";
-import { Window } from "nsh/desktop";
+import { focusMainWindow } from "./windowControl";
 import process from "process";
 
 export interface ScreenArea { x: number; y: number; width: number; height: number }
@@ -81,7 +81,7 @@ export function revealWindow(): boolean {
     console.log("desktop: revealWindow (suppressed by T3GPUI_NO_ACTIVATE)");
     return false;
   }
-  Window.orderFront();
+  focusMainWindow();
   return true;
 }
 

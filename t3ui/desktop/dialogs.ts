@@ -1,5 +1,6 @@
 // LocalApi dialogs.pickFolder (Electron showOpenDialog in the reference). NSH's Picker picks images only, so on macOS the
 // system folder dialog comes from `osascript` (StandardAdditions `choose folder`, which needs no Automation permission).
+import { host } from "nsh";
 import { desktop, isMac } from "./runtime";
 
 export const OSASCRIPT = "/usr/bin/osascript";
@@ -12,11 +13,15 @@ export function pickFolderArgs(initialPath?: string): string[] {
   return ["-e", `POSIX path of (choose folder${from})`];
 }
 
-export const canPickFolder = () => isMac();
+export const canPickFolder = () => isMac() || host.available();
 
 /** The chosen folder's path (no trailing slash), `null` when the user cancels (error -128). */
 export async function pickFolder(options: { initialPath?: string } = {}): Promise<string | null> {
-  if (!isMac()) throw new Error("The folder dialog is not available.");
+  if (!isMac()) {
+    if (!host.available()) throw new Error("The folder dialog is not available.");
+    const picked = await host.call("dialogs.pickFolder", options.initialPath ? { initialPath: options.initialPath } : {}, { timeout: 0 });
+    return typeof picked === "string" && picked.length > 0 ? picked : null;
+  }
   const output = await desktop().run(OSASCRIPT, pickFolderArgs(options.initialPath), { timeoutMs: null });
   if (output.code !== 0) {
     if (/-128/.test(output.stderr)) return null;
@@ -33,7 +38,15 @@ export function pickImageFileArgs(initialPath?: string): string[] {
 
 /** The chosen image file's path, `null` when the user cancels (the project favicon picker's "Open in Finder"). */
 export async function pickImageFile(options: { initialPath?: string } = {}): Promise<string | null> {
-  if (!isMac()) throw new Error("The file dialog is not available.");
+  if (!isMac()) {
+    if (!host.available()) throw new Error("The file dialog is not available.");
+    const picked = await host.call("dialogs.pickFiles", {
+      imagesOnly: true,
+      multiple: false,
+      ...(options.initialPath ? { initialPath: options.initialPath } : {}),
+    }, { timeout: 0 });
+    return Array.isArray(picked) && typeof picked[0] === "string" && picked[0].length > 0 ? picked[0] : null;
+  }
   const output = await desktop().run(OSASCRIPT, pickImageFileArgs(options.initialPath), { timeoutMs: null });
   if (output.code !== 0) {
     if (/-128/.test(output.stderr)) return null;
@@ -57,7 +70,11 @@ export function pickFilesArgs(options: { imagesOnly?: boolean } = {}): string[] 
 
 /** The chosen files' paths, `[]` when the user cancels (error -128). */
 export async function pickFiles(options: { imagesOnly?: boolean } = {}): Promise<string[]> {
-  if (!isMac()) throw new Error("The file dialog is not available.");
+  if (!isMac()) {
+    if (!host.available()) throw new Error("The file dialog is not available.");
+    const picked = await host.call("dialogs.pickFiles", { imagesOnly: options.imagesOnly === true, multiple: true }, { timeout: 0 });
+    return Array.isArray(picked) ? picked.filter((entry): entry is string => typeof entry === "string" && entry.length > 0) : [];
+  }
   const output = await desktop().run(OSASCRIPT, pickFilesArgs(options), { timeoutMs: null });
   if (output.code !== 0) {
     if (/-128/.test(output.stderr)) return [];

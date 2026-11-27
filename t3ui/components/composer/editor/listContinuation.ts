@@ -336,3 +336,46 @@ export function listOutdentForTab(
   }
   return { start: line.start, end: replacedEnd, replacement, cursorAfter };
 }
+
+export function liftBlockPrefixAtStart(
+  value: string,
+  offset: number,
+  ranges: TokenRanges = [],
+): { text: string; caret: number } | null {
+  if (!Number.isInteger(offset) || offset < 0 || offset > value.length) return null;
+  const outdent = listOutdentForTab(value, offset, offset, ranges);
+  if (outdent) {
+    return {
+      text: value.slice(0, outdent.start) + outdent.replacement + value.slice(outdent.end),
+      caret: outdent.cursorAfter,
+    };
+  }
+  const start = value.lastIndexOf("\n", offset - 1) + 1;
+  const before = value.slice(start, offset);
+  if (!/^(?:[ \t]*(?:-[ \t]+\[[ xX]\][ \t]*|\d+[.)][ \t]*|[-*+][ \t]*)|#{1,6}[ \t]+)$/.test(before)) return null;
+  return { text: value.slice(0, start) + value.slice(offset), caret: start };
+}
+
+export function joinParagraphAfterListAtStart(
+  value: string,
+  offset: number,
+): { text: string; caret: number } | null {
+  if (!Number.isInteger(offset) || offset <= 0 || offset > value.length) return null;
+  if (value[offset - 1] !== "\n") return null;
+  if (offset >= 2 && value[offset - 2] === "\n") {
+    if (offset < value.length && value[offset] === "\n") {
+      return { text: value.slice(0, offset - 1) + value.slice(offset), caret: offset - 2 };
+    }
+    const cut = offset - 2;
+    const rest = value.slice(offset);
+    const prevLineStart = value.lastIndexOf("\n", cut - 1) + 1;
+    const prevLine = value.slice(prevLineStart, cut);
+    const needsSpace =
+      rest.length > 0 &&
+      !/^[ \t]/.test(rest) &&
+      /^[ \t]*(?:-[ \t]+\[[ xX]\]|\d+[.)]|[-*+])$/.test(prevLine);
+    const join = needsSpace ? " " : "";
+    return { text: value.slice(0, cut) + join + rest, caret: cut + join.length };
+  }
+  return { text: value.slice(0, offset - 1) + value.slice(offset), caret: offset - 1 };
+}
